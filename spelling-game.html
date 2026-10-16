@@ -1,0 +1,326 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Spelling Game</title>
+<style>
+  :root {
+    --bg: #ffffff;
+    --fg: #111111;
+    --muted: #666666;
+    --line: #bbbbbb;
+    --good: #1a7f37;
+    --bad: #c62828;
+    color-scheme: light dark;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #181818;
+      --fg: #eeeeee;
+      --muted: #999999;
+      --line: #555555;
+      --good: #4ade80;
+      --bad: #f87171;
+    }
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    margin: 0;
+    min-height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: var(--bg);
+    color: var(--fg);
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, Arial, sans-serif;
+    line-height: 1.4;
+  }
+
+  main {
+    width: 100%;
+    max-width: 380px;
+    padding: 24px;
+  }
+
+  h1 { font-size: 1.4rem; margin: 0 0 8px; font-weight: 600; }
+  p { margin: 0 0 16px; color: var(--muted); }
+
+  button {
+    font: inherit;
+    color: inherit;
+    background: transparent;
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    padding: 10px 14px;
+    cursor: pointer;
+    transition: border-color .15s, background-color .15s;
+  }
+  button:hover { border-color: var(--fg); }
+  button:focus-visible, input:focus-visible { outline: 2px solid var(--fg); outline-offset: 2px; }
+
+  .hidden { display: none; }
+
+  /* Menu */
+  .levels { display: flex; flex-direction: column; gap: 8px; margin-bottom: 16px; }
+  .level { text-align: left; display: flex; justify-content: space-between; }
+  .level span { color: var(--muted); }
+  .level[aria-pressed="true"] { border-color: var(--fg); background: rgba(128,128,128,.12); }
+  .primary { width: 100%; background: var(--fg); color: var(--bg); border-color: var(--fg); }
+  .primary:hover { opacity: .85; }
+
+  /* Game */
+  .top { display: flex; justify-content: space-between; color: var(--muted); font-size: .9rem; margin-bottom: 28px; }
+
+  .play-row { display: flex; gap: 8px; margin-bottom: 20px; animation: fade .35s ease; }
+  .play-row .play { flex: 1; display: flex; align-items: center; justify-content: center; gap: 10px; }
+
+  .dot {
+    width: 10px; height: 10px; border-radius: 50%;
+    background: var(--muted);
+  }
+  .speaking .dot { animation: pulse .7s ease-in-out infinite; background: var(--fg); }
+
+  input[type="text"] {
+    width: 100%;
+    font: inherit;
+    font-size: 1.3rem;
+    padding: 12px;
+    text-align: center;
+    color: inherit;
+    background: transparent;
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    margin-bottom: 12px;
+    transition: border-color .2s;
+  }
+  input.ok { border-color: var(--good); }
+  input.bad { border-color: var(--bad); animation: shake .35s; }
+
+  #feedback { min-height: 1.5em; margin: 0 0 12px; text-align: center; }
+  #feedback.ok { color: var(--good); }
+  #feedback.bad { color: var(--bad); }
+
+  .bottom { margin-top: 24px; text-align: center; }
+  .link { border: none; color: var(--muted); text-decoration: underline; padding: 4px; }
+
+  @keyframes fade { from { opacity: 0; } to { opacity: 1; } }
+  @keyframes pulse { 0%,100% { transform: scale(1); } 50% { transform: scale(1.6); } }
+  @keyframes shake {
+    0%,100% { transform: translateX(0); }
+    25% { transform: translateX(-6px); }
+    75% { transform: translateX(6px); }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    * { animation: none !important; transition: none !important; }
+  }
+</style>
+</head>
+<body>
+<main>
+
+  <!-- Menu -->
+  <section id="menu">
+    <h1>Spelling Game</h1>
+    <p>Listen to the word, then type how it's spelled.</p>
+    <div class="levels" id="levels">
+      <button class="level" data-level="easy" aria-pressed="false">Easy <span>short, common words</span></button>
+      <button class="level" data-level="normal" aria-pressed="true">Normal <span>trickier words</span></button>
+      <button class="level" data-level="hard" aria-pressed="false">Hard <span>tough words</span></button>
+    </div>
+    <button class="primary" id="startBtn">Start</button>
+    <p id="unsupported" class="hidden" style="margin-top:16px;color:var(--bad)">
+      Your browser doesn't support text-to-speech, so the game can't play audio.
+    </p>
+  </section>
+
+  <!-- Game -->
+  <section id="game" class="hidden">
+    <div class="top">
+      <span id="levelLabel"></span>
+      <span>Score: <b id="score">0</b> &nbsp; Streak: <b id="streak">0</b></span>
+    </div>
+
+    <div class="play-row" id="playRow">
+      <button class="play" id="playBtn"><span class="dot"></span> Play word</button>
+      <button id="slowBtn" title="Play slowly">Slow</button>
+    </div>
+
+    <input type="text" id="answer" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" aria-label="Type the spelling" placeholder="Type the word">
+    <button class="primary" id="checkBtn">Check</button>
+    <p id="feedback" role="status" aria-live="polite"></p>
+
+    <div class="bottom">
+      <button class="link" id="menuBtn">Change difficulty</button>
+    </div>
+  </section>
+
+</main>
+
+<script>
+const WORDS = {
+  easy: [
+    "because","friend","school","water","happy","animal","family","garden","orange","purple",
+    "mother","yellow","window","people","simple","little","summer","winter","flower","button",
+    "monkey","pencil","rabbit","bridge","cookie","dinner","finger","jungle","kitchen","laugh",
+    "listen","number","market","planet","rocket","sister","tiger","wonder","zebra","bread",
+    "clock","dragon","earth","finish","ground","house","island","pocket","queen","shadow"
+  ],
+  normal: [
+    "separate","definitely","necessary","calendar","environment","government","library","beautiful",
+    "restaurant","argument","believe","receive","weird","tomorrow","recommend","occasion","embarrass",
+    "grammar","height","immediately","knowledge","maintenance","neighbor","parallel","schedule",
+    "success","surprise","temperature","vacuum","whether","address","business","character","daughter",
+    "exercise","favorite","guarantee","interesting","jewelry","language","mountain","opposite",
+    "package","question","relevant","strength","through","unusual","village","yesterday"
+  ],
+  hard: [
+    "accommodate","conscientious","entrepreneur","onomatopoeia","rhythm","pneumonia","maneuver",
+    "mnemonic","miscellaneous","bureaucracy","conscience","questionnaire","surveillance","silhouette",
+    "camaraderie","liaison","pharaoh","psychology","supersede","threshold","ubiquitous","vengeance",
+    "xylophone","phenomenon","idiosyncrasy","minuscule","occurrence","perseverance","quarantine",
+    "reconnaissance","sacrilegious","tyranny","unanimous","bourgeoisie","chauffeur","cemetery",
+    "connoisseur","dilemma","ephemeral","fluorescent","hierarchy","hypocrisy","indict","lieutenant",
+    "mischievous","obsolete","paraphernalia","rendezvous","guarantee","acquiesce"
+  ]
+};
+
+const $ = id => document.getElementById(id);
+const menu = $("menu"), game = $("game");
+const answer = $("answer"), feedback = $("feedback");
+
+let level = "normal";
+let queue = [];
+let current = "";
+let score = 0, streak = 0;
+let locked = false;
+let voice = null;
+
+const hasTTS = "speechSynthesis" in window;
+if (!hasTTS) $("unsupported").classList.remove("hidden");
+
+/* ---------- Text to speech ---------- */
+function pickVoice() {
+  if (!hasTTS) return;
+  const voices = speechSynthesis.getVoices();
+  voice = voices.find(v => v.lang === "en-US" && v.localService)
+       || voices.find(v => v.lang.startsWith("en"))
+       || null;
+}
+if (hasTTS) {
+  pickVoice();
+  speechSynthesis.addEventListener("voiceschanged", pickVoice);
+}
+
+function speak(word, rate = 0.85) {
+  if (!hasTTS) return;
+  speechSynthesis.cancel();
+  const u = new SpeechSynthesisUtterance(word);
+  u.lang = "en-US";
+  u.rate = rate;
+  if (voice) u.voice = voice;
+  const row = $("playRow");
+  u.onstart = () => row.classList.add("speaking");
+  u.onend = u.onerror = () => row.classList.remove("speaking");
+  speechSynthesis.speak(u);
+}
+
+/* ---------- Random word picking ---------- */
+function shuffle(arr) {
+  const a = arr.slice();
+  for (let i = a.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [a[i], a[j]] = [a[j], a[i]];
+  }
+  return a;
+}
+
+function nextWord() {
+  if (queue.length === 0) {
+    queue = shuffle(WORDS[level]);
+    if (queue[queue.length - 1] === current) queue.reverse(); // avoid immediate repeat
+  }
+  return queue.pop();
+}
+
+/* ---------- Game flow ---------- */
+function newRound() {
+  current = nextWord();
+  locked = false;
+  answer.value = "";
+  answer.disabled = false;
+  answer.className = "";
+  feedback.textContent = "";
+  feedback.className = "";
+  answer.focus();
+  speak(current);
+}
+
+function startGame() {
+  score = 0; streak = 0;
+  queue = [];
+  current = "";
+  $("score").textContent = 0;
+  $("streak").textContent = 0;
+  $("levelLabel").textContent = level[0].toUpperCase() + level.slice(1);
+  menu.classList.add("hidden");
+  game.classList.remove("hidden");
+  newRound();
+}
+
+function check() {
+  if (locked) return;
+  const guess = answer.value.trim().toLowerCase();
+  if (!guess) return;
+
+  if (guess === current) {
+    locked = true;
+    score++; streak++;
+    $("score").textContent = score;
+    $("streak").textContent = streak;
+    answer.className = "ok";
+    answer.disabled = true;
+    feedback.textContent = "Correct!";
+    feedback.className = "ok";
+    setTimeout(newRound, 900);
+  } else {
+    streak = 0;
+    $("streak").textContent = 0;
+    // restart the shake animation
+    answer.className = "";
+    void answer.offsetWidth;
+    answer.className = "bad";
+    feedback.textContent = "Not quite. Listen again and try once more.";
+    feedback.className = "bad";
+    answer.select();
+  }
+}
+
+/* ---------- Events ---------- */
+document.querySelectorAll(".level").forEach(btn => {
+  btn.addEventListener("click", () => {
+    level = btn.dataset.level;
+    document.querySelectorAll(".level").forEach(b =>
+      b.setAttribute("aria-pressed", b === btn ? "true" : "false"));
+  });
+});
+
+$("startBtn").addEventListener("click", startGame);
+$("playBtn").addEventListener("click", () => { speak(current); answer.focus(); });
+$("slowBtn").addEventListener("click", () => { speak(current, 0.5); answer.focus(); });
+$("checkBtn").addEventListener("click", check);
+answer.addEventListener("keydown", e => { if (e.key === "Enter") check(); });
+answer.addEventListener("input", () => {
+  if (!locked) { answer.className = ""; feedback.textContent = ""; }
+});
+$("menuBtn").addEventListener("click", () => {
+  if (hasTTS) speechSynthesis.cancel();
+  game.classList.add("hidden");
+  menu.classList.remove("hidden");
+});
+</script>
+</body>
+</html>
