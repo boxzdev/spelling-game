@@ -1,0 +1,26 @@
+{
+  "easy": [
+    "because", "friend", "school", "water", "happy", "animal", "family", "garden", "orange", "purple",
+    "mother", "yellow", "window", "people", "simple", "little", "summer", "winter", "flower", "button",
+    "monkey", "pencil", "rabbit", "bridge", "cookie", "dinner", "finger", "jungle", "kitchen", "laugh",
+    "listen", "number", "market", "planet", "rocket", "sister", "tiger", "wonder", "zebra", "bread",
+    "clock", "dragon", "earth", "finish", "ground", "house", "island", "pocket", "queen", "shadow"
+  ],
+  "normal": [
+    "separate", "definitely", "necessary", "calendar", "environment", "government", "library", "beautiful",
+    "restaurant", "argument", "believe", "receive", "weird", "tomorrow", "recommend", "occasion", "embarrass",
+    "grammar", "height", "immediately", "knowledge", "maintenance", "neighbor", "parallel", "schedule",
+    "success", "surprise", "temperature", "vacuum", "whether", "address", "business", "character", "daughter",
+    "exercise", "favorite", "guarantee", "interesting", "jewelry", "language", "mountain", "opposite",
+    "package", "question", "relevant", "strength", "through", "unusual", "village", "yesterday"
+  ],
+  "hard": [
+    "accommodate", "conscientious", "entrepreneur", "onomatopoeia", "rhythm", "pneumonia", "maneuver",
+    "mnemonic", "miscellaneous", "bureaucracy", "conscience", "questionnaire", "surveillance", "silhouette",
+    "camaraderie", "liaison", "pharaoh", "psychology", "supersede", "threshold", "ubiquitous", "vengeance",
+    "xylophone", "phenomenon", "idiosyncrasy", "minuscule", "occurrence", "perseverance", "quarantine",
+    "reconnaissance", "sacrilegious", "tyranny", "unanimous", "bourgeoisie", "chauffeur", "cemetery",
+    "connoisseur", "dilemma", "ephemeral", "fluorescent", "hierarchy", "hypocrisy", "indict", "lieutenant",
+    "mischievous", "obsolete", "paraphernalia", "rendezvous", "acquiesce", "gauge"
+  ]
+}
