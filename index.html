@@ -213,7 +213,7 @@
     <p class="note" id="voiceNote"></p>
 
     <input type="text" id="answer" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" aria-label="Type the spelling" placeholder="Type the word">
-    <button class="secondary" id="hearBtn" type="button">Hear what I typed (-1 streak)</button>
+    <button class="secondary" id="hearBtn" type="button" disabled title="Needs a streak of at least 1">Hear what I typed (-1 streak)</button>
     <button class="primary" id="checkBtn">Check</button>
     <p id="feedback" role="status" aria-live="polite"></p>
 
@@ -737,15 +737,21 @@ function startGame() {
   current = "";
   $("score").textContent = 0;
   $("streak").textContent = 0;
+  updateHearBtn();
   $("levelLabel").textContent = level[0].toUpperCase() + level.slice(1);
   menu.classList.add("hidden");
   game.classList.remove("hidden");
   newRound();
 }
 
-// Costs 1 streak point (never below 0) to hear the typed text read aloud
+// The hear button only works while you have a streak to spend
+function updateHearBtn() {
+  $("hearBtn").disabled = streak < 1;
+}
+
+// Costs 1 streak point to hear the typed text read aloud
 function hearTyped() {
-  if (locked) return;
+  if (locked || streak < 1) return;
   const typed = answer.value.trim();
   if (!typed) {
     feedback.textContent = "Type something first.";
@@ -753,12 +759,10 @@ function hearTyped() {
     answer.focus();
     return;
   }
-  const lost = streak > 0;
-  if (lost) {
-    streak--;
-    $("streak").textContent = streak;
-  }
-  feedback.textContent = lost ? "Streak -1" : "Playing what you typed";
+  streak--;
+  $("streak").textContent = streak;
+  updateHearBtn();
+  feedback.textContent = "Streak -1";
   feedback.className = "";
   speak(typed);
   answer.focus();
@@ -774,6 +778,7 @@ function check() {
     score++; streak++;
     $("score").textContent = score;
     $("streak").textContent = streak;
+    updateHearBtn();
     answer.className = "ok";
     answer.disabled = true;
     feedback.textContent = "Correct!";
@@ -782,6 +787,7 @@ function check() {
   } else {
     streak = 0;
     $("streak").textContent = 0;
+    updateHearBtn();
     // restart the shake animation
     answer.className = "";
     void answer.offsetWidth;
