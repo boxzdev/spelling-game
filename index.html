@@ -725,6 +725,7 @@ function newRound() {
   answer.className = "";
   feedback.textContent = "";
   feedback.className = "";
+  updateHearBtn();
   answer.focus();
   speak(current);
   preloadNext();
