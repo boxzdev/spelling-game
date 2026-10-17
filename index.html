@@ -117,12 +117,10 @@
     margin-bottom: 12px;
     transition: border-color .2s;
   }
+  .secondary { width: 100%; margin-bottom: 12px; color: var(--muted); }
+  .secondary:hover { color: var(--fg); }
   input.ok { border-color: var(--good); }
   input.bad { border-color: var(--bad); animation: shake .35s; }
-
-  .action-row { display: flex; gap: 8px; }
-  .action-row .primary { flex: 1; width: auto; }
-  #hearTypedBtn { white-space: nowrap; }
 
   #feedback { min-height: 1.5em; margin: 0 0 12px; text-align: center; }
   #feedback.ok { color: var(--good); }
@@ -215,10 +213,8 @@
     <p class="note" id="voiceNote"></p>
 
     <input type="text" id="answer" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" aria-label="Type the spelling" placeholder="Type the word">
-    <div class="action-row">
-      <button class="primary" id="checkBtn">Check</button>
-      <button id="hearTypedBtn" title="Hear what you typed (costs 1 streak)">Hear mine (-1 streak)</button>
-    </div>
+    <button class="secondary" id="hearBtn" type="button">Hear what I typed (-1 streak)</button>
+    <button class="primary" id="checkBtn">Check</button>
     <p id="feedback" role="status" aria-live="polite"></p>
 
     <div class="bottom">
@@ -228,12 +224,603 @@
 
 </main>
 
-<script src="js/state.js"></script>
-<script src="js/settings.js"></script>
-<script src="js/tts-workers.js"></script>
-<script src="js/tts-engines.js"></script>
-<script src="js/audio-player.js"></script>
-<script src="js/game.js"></script>
-<script src="js/main.js"></script>
+<script>
+const $ = id => document.getElementById(id);
+const menu = $("menu"), game = $("game");
+const answer = $("answer"), feedback = $("feedback");
+
+let WORDS = null;          // loaded from words.json
+let level = "normal";
+let queue = [];
+let current = "";
+let score = 0, streak = 0;
+let locked = false;
+let browserVoice = null;
+
+const hasTTS = "speechSynthesis" in window;
+
+/* ---------- Load words from words.json ---------- */
+async function loadWords() {
+  const startBtn = $("startBtn");
+  try {
+    const res = await fetch("words.json");
+    if (!res.ok) throw new Error("HTTP " + res.status);
+    const data = await res.json();
+    for (const k of ["easy", "normal", "hard"]) {
+      if (!Array.isArray(data[k]) || data[k].length === 0) {
+        throw new Error('Missing or empty list: "' + k + '"');
+      }
+    }
+    WORDS = data;
+    startBtn.disabled = false;
+    startBtn.textContent = "Start";
+  } catch (err) {
+    startBtn.textContent = "Start";
+    const box = $("loadError");
+    box.textContent = "Couldn't load words.json (" + err.message + "). " +
+      "Make sure it's next to index.html and the page is opened through a web server or GitHub Pages, not as a local file.";
+    box.classList.remove("hidden");
+  }
+}
+loadWords();
+
+/* ---------- Settings ---------- */
+const HINTS = {
+  kokoro:  "Natural AI voice that runs inside your browser. Downloads about 90 MB the first time, then it's saved.",
+  piper:   "AI voice that runs inside your browser. Makes each word faster than Kokoro but sounds a little less natural. Downloads roughly 60-80 MB the first time, then it's saved.",
+  google:  "Needs internet. Natural sounding, but it's an unofficial service.",
+  browser: "Your device's built-in voice. Works offline."
+};
+const KOKORO_VOICES = ["af_heart", "af_bella", "am_michael", "bf_emma", "bm_george"];
+const PIPER_VOICES = ["en_US-hfc_female-medium", "en_US-hfc_male-medium", "en_US-lessac-medium", "en_US-amy-medium", "en_US-ryan-medium"];
+
+let voiceSetting = "kokoro";
+let kokoroVoice = "af_heart";
+let piperVoice = "en_US-hfc_female-medium";
+try {
+  const v = localStorage.getItem("spelling.voice");
+  const kv = localStorage.getItem("spelling.kvoice");
+  if (v && HINTS[v]) voiceSetting = v;
+  if (kv && KOKORO_VOICES.includes(kv)) kokoroVoice = kv;
+  const pv = localStorage.getItem("spelling.pvoice");
+  if (pv && PIPER_VOICES.includes(pv)) piperVoice = pv;
+} catch (e) {}
+
+function save(key, val) { try { localStorage.setItem(key, val); } catch (e) {} }
+
+function refreshSettingsUI() {
+  $("voiceSel").value = voiceSetting;
+  $("kvoiceSel").value = kokoroVoice;
+  $("pvoiceSel").value = piperVoice;
+  $("kvoiceWrap").classList.toggle("hidden", voiceSetting !== "kokoro");
+  $("pvoiceWrap").classList.toggle("hidden", voiceSetting !== "piper");
+  $("voiceHint").textContent = HINTS[voiceSetting];
+  showModel();
+}
+
+$("voiceSel").addEventListener("change", e => {
+  voiceSetting = e.target.value;
+  save("spelling.voice", voiceSetting);
+  setNote("");
+  startActiveEngine();
+  refreshSettingsUI();
+});
+
+$("kvoiceSel").addEventListener("change", e => {
+  kokoroVoice = e.target.value;
+  save("spelling.kvoice", kokoroVoice);
+});
+
+$("pvoiceSel").addEventListener("change", e => {
+  piperVoice = e.target.value;
+  save("spelling.pvoice", piperVoice);
+  startActiveEngine();
+  showModel();
+});
+
+$("testBtn").addEventListener("click", () => {
+  const list = WORDS ? WORDS[level] : ["spelling"];
+  speak(list[Math.floor(Math.random() * list.length)]);
+});
+
+function setNote(msg) {
+  $("voiceNote").textContent = msg;
+  $("testNote").textContent = msg;
+}
+
+/* ---------- AI voices (Kokoro and Piper) run in background workers so the page stays smooth ---------- */
+const SPEED_NORMAL = 0.9, SPEED_SLOW = 0.6;   // Kokoro speaking speeds
+
+// These strings run in separate threads, so downloading and generating never freeze the page.
+const KOKORO_WORKER = `
+import { KokoroTTS } from "https://cdn.jsdelivr.net/npm/kokoro-js@1/+esm";
+
+let tts = null;
+const files = {};
+let lastPost = 0;
+
+self.onmessage = async (e) => {
+  const m = e.data;
+  try {
+    if (m.type === "init") {
+      if (!tts) {
+        tts = await KokoroTTS.from_pretrained("onnx-community/Kokoro-82M-v1.0-ONNX", {
+          dtype: "q8",
+          device: "wasm",
+          progress_callback: (p) => {
+            if (p.status === "progress" && p.total) {
+              files[p.file] = { loaded: p.loaded, total: p.total };
+              const now = Date.now();
+              if (now - lastPost > 250) {
+                lastPost = now;
+                let l = 0, t = 0;
+                for (const f of Object.values(files)) { l += f.loaded; t += f.total; }
+                self.postMessage({ type: "progress", pct: Math.min(99, Math.round((l / t) * 100)) });
+              }
+            }
+          }
+        });
+      }
+      self.postMessage({ type: "ready" });
+    } else if (m.type === "generate") {
+      const audio = await tts.generate(m.text, { voice: m.voice, speed: m.speed });
+      if (audio.audio) {
+        const samples = new Float32Array(audio.audio);
+        self.postMessage({ type: "audio", id: m.id, samples: samples, sr: audio.sampling_rate }, [samples.buffer]);
+      } else {
+        self.postMessage({ type: "audio", id: m.id, blob: audio.toBlob() });
+      }
+    }
+  } catch (err) {
+    self.postMessage({ type: "error", id: m.id, message: String((err && err.message) || err) });
+  }
+};
+`;
+
+const PIPER_WORKER = `
+const URLS = [
+  "https://cdn.jsdelivr.net/npm/@mintplex-labs/piper-tts-web@1.0.4/+esm",
+  "https://esm.sh/@mintplex-labs/piper-tts-web@1.0.4"
+];
+let lib = null;
+const files = {};
+let lastPost = 0;
+
+async function loadLib() {
+  if (lib) return lib;
+  let lastErr = null;
+  for (const u of URLS) {
+    try {
+      const mod = await import(u);
+      lib = mod.predict ? mod : (mod.default && mod.default.predict ? mod.default : mod);
+      return lib;
+    } catch (err) { lastErr = err; }
+  }
+  throw lastErr || new Error("Couldn't load the Piper library");
+}
+
+self.onmessage = async (e) => {
+  const m = e.data;
+  try {
+    const L = await loadLib();
+    if (m.type === "init") {
+      await L.download(m.voice, (p) => {
+        if (p && p.total) {
+          files[p.url] = { loaded: p.loaded, total: p.total };
+          const now = Date.now();
+          if (now - lastPost > 250) {
+            lastPost = now;
+            let l = 0, t = 0;
+            for (const f of Object.values(files)) { l += f.loaded; t += f.total; }
+            self.postMessage({ type: "progress", pct: Math.min(99, Math.round((l / t) * 100)) });
+          }
+        }
+      });
+      // Warm up once so the first real word isn't slow
+      await L.predict({ text: "hello", voiceId: m.voice });
+      self.postMessage({ type: "ready" });
+    } else if (m.type === "generate") {
+      const wav = await L.predict({ text: m.text, voiceId: m.voice });
+      self.postMessage({ type: "audio", id: m.id, blob: wav });
+    }
+  } catch (err) {
+    self.postMessage({ type: "error", id: m.id, message: String((err && err.message) || err) });
+  }
+};
+`;
+
+function wavFromSamples(samples, sr) {
+  const buf = new ArrayBuffer(44 + samples.length * 2);
+  const v = new DataView(buf);
+  const w = (o, str) => { for (let i = 0; i < str.length; i++) v.setUint8(o + i, str.charCodeAt(i)); };
+  w(0, "RIFF"); v.setUint32(4, 36 + samples.length * 2, true); w(8, "WAVE"); w(12, "fmt ");
+  v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, 1, true);
+  v.setUint32(24, sr, true); v.setUint32(28, sr * 2, true); v.setUint16(32, 2, true); v.setUint16(34, 16, true);
+  w(36, "data"); v.setUint32(40, samples.length * 2, true);
+  for (let i = 0; i < samples.length; i++) {
+    const x = Math.max(-1, Math.min(1, samples[i]));
+    v.setInt16(44 + i * 2, x < 0 ? x * 0x8000 : x * 0x7fff, true);
+  }
+  return new Blob([buf], { type: "audio/wav" });
+}
+
+// One engine = one background worker + its loading state + a cache of generated words
+function makeEngine(label, workerSrc, perVoice) {
+  const e = {
+    label, perVoice,
+    state: "idle",            // idle | loading | ready | error
+    pct: 0, error: "",
+    worker: null, readyKey: null, initKey: null, initPromise: null,
+    initResolve: null, initReject: null,
+    chain: Promise.resolve(), // generate one word at a time
+    cache: {},                // "voice|speed|word" -> Promise<blob url>
+    pending: {}, nextId: 1
+  };
+
+  function startWorker() {
+    const blobUrl = URL.createObjectURL(new Blob([workerSrc], { type: "text/javascript" }));
+    e.worker = new Worker(blobUrl, { type: "module" });
+    e.worker.onmessage = ev => {
+      const m = ev.data;
+      if (m.type === "progress") {
+        e.pct = m.pct;
+        showModel();
+      } else if (m.type === "ready") {
+        if (e.initResolve) e.initResolve();
+      } else if (m.type === "audio") {
+        const p = e.pending[m.id];
+        if (p) { delete e.pending[m.id]; p.resolve(m); }
+      } else if (m.type === "error") {
+        const err = new Error(m.message);
+        const p = m.id != null ? e.pending[m.id] : null;
+        if (p) { delete e.pending[m.id]; p.reject(err); }
+        else if (e.initReject) e.initReject(err);
+      }
+    };
+    e.worker.onerror = ev => {
+      if (e.initReject) e.initReject(new Error(ev.message || "Worker failed to start"));
+    };
+  }
+
+  e.ensure = function (voice) {
+    const key = perVoice ? voice : "*";
+    if (e.state === "ready" && e.readyKey === key) return Promise.resolve();
+    if (e.state === "loading" && e.initKey === key && e.initPromise) return e.initPromise;
+
+    e.state = "loading";
+    e.pct = 0;
+    e.initKey = key;
+    showModel();
+
+    const p = new Promise((resolve, reject) => {
+      e.initResolve = resolve;
+      e.initReject = reject;
+      try { if (!e.worker) startWorker(); } catch (err) { reject(err); return; }
+      e.worker.postMessage({ type: "init", voice });
+    }).then(() => {
+      if (e.initKey === key) { e.state = "ready"; e.readyKey = key; showModel(); }
+    }).catch(err => {
+      e.state = "error";
+      e.error = (err && err.message) ? err.message : String(err);
+      e.initPromise = null;
+      if (e.worker) { e.worker.terminate(); e.worker = null; }
+      showModel();
+      throw err;
+    });
+    e.initPromise = p;
+    return p;
+  };
+
+  e.generate = (text, voice, speed) => new Promise((resolve, reject) => {
+    const id = e.nextId++;
+    e.pending[id] = { resolve, reject };
+    e.worker.postMessage({ type: "generate", id, text, voice, speed });
+  });
+
+  e.url = function (word, voice, speed) {
+    const key = voice + "|" + speed + "|" + word;
+    if (!e.cache[key]) {
+      const p = e.chain.then(async () => {
+        const m = await e.generate(word, voice, speed);
+        const blob = m.blob || wavFromSamples(m.samples, m.sr);
+        return URL.createObjectURL(blob);
+      });
+      e.chain = p.catch(() => {});
+      p.catch(() => { delete e.cache[key]; });
+      e.cache[key] = p;
+    }
+    return e.cache[key];
+  };
+
+  return e;
+}
+
+const kokoro = makeEngine("Kokoro", KOKORO_WORKER, false);
+const piper = makeEngine("Piper", PIPER_WORKER, true);
+
+function activeEngine() {
+  return voiceSetting === "kokoro" ? kokoro : voiceSetting === "piper" ? piper : null;
+}
+function activeVoice() {
+  return voiceSetting === "piper" ? piperVoice : kokoroVoice;
+}
+function startActiveEngine() {
+  const e = activeEngine();
+  if (e) e.ensure(activeVoice()).catch(() => {});
+}
+
+function showModel() {
+  const el = $("modelNote");
+  const e = activeEngine();
+  if (!e) { el.textContent = ""; return; }
+  if (e.state === "loading") el.textContent = e.pct >= 99 ? "Starting voice..." : "Loading voice model... " + e.pct + "%";
+  else if (e.state === "ready") el.textContent = "Voice model ready.";
+  else if (e.state === "error") el.textContent = "Couldn't load the voice model (" + e.error + "). Try another voice.";
+  else el.textContent = "";
+}
+
+async function engineSource(eng, voice, speed, word) {
+  if (eng.state === "error") throw new Error(eng.label + " couldn't load");
+  if (eng.state !== "ready" || (eng.perVoice && eng.readyKey !== voice)) {
+    eng.ensure(voice).catch(() => {});
+    throw new Error("Voice model still loading (" + eng.pct + "%)");
+  }
+  if (!eng.cache[voice + "|" + speed + "|" + word]) setNote("Generating voice...");
+  return await Promise.race([
+    eng.url(word, voice, speed),
+    new Promise((_, reject) => setTimeout(() => reject(new Error("Voice took too long")), 15000))
+  ]);
+}
+
+/* ---------- Playing audio ---------- */
+const player = new Audio();       // one shared element, so mobile browsers keep it unlocked
+let speakToken = 0;
+
+// Mobile browsers only allow audio after a tap. Unlock the player on the first tap.
+const SILENT = "data:audio/wav;base64,UklGRigAAABXQVZFZm10IBAAAAABAAEARKwAAIhYAQACABAAAABkYXRhAgAAAAEA";
+let unlocked = false;
+function unlockAudio() {
+  if (unlocked) return;
+  unlocked = true;
+  player.src = SILENT;
+  player.play().then(() => { if (player.src === SILENT) player.pause(); }).catch(() => {});
+}
+["click", "touchend", "keydown"].forEach(ev =>
+  document.addEventListener(ev, unlockAudio, { capture: true, passive: true }));
+
+function pickBrowserVoice() {
+  if (!hasTTS) return;
+  const good = ["natural", "online", "premium", "enhanced", "google us", "samantha", "aria", "jenny", "ava"];
+  const rank = v => {
+    const n = v.name.toLowerCase();
+    return (good.some(g => n.includes(g)) ? 10 : 0) + (v.lang === "en-US" ? 2 : 0);
+  };
+  browserVoice = speechSynthesis.getVoices()
+    .filter(v => v.lang.startsWith("en"))
+    .sort((a, b) => rank(b) - rank(a))[0] || null;
+}
+if (hasTTS) {
+  pickBrowserVoice();
+  speechSynthesis.addEventListener("voiceschanged", pickBrowserVoice);
+}
+
+function stopAudio() {
+  player.pause();
+  if (hasTTS) speechSynthesis.cancel();
+  $("playRow").classList.remove("speaking");
+}
+
+function speakFallback(word, rate) {
+  if (!hasTTS) return;
+  const u = new SpeechSynthesisUtterance(word);
+  u.lang = "en-US";
+  u.rate = rate;
+  if (browserVoice) u.voice = browserVoice;
+  const row = $("playRow");
+  u.onstart = () => row.classList.add("speaking");
+  u.onend = u.onerror = () => row.classList.remove("speaking");
+  speechSynthesis.speak(u);
+}
+
+function playUrl(url, token, label, onFail, rate = 1) {
+  const row = $("playRow");
+  let started = false;
+  let timer = null;
+
+  const fail = () => {
+    if (token !== speakToken) return;
+    clearTimeout(timer);
+    player.onplaying = player.onended = player.onerror = null;
+    player.pause();
+    onFail();
+  };
+
+  timer = setTimeout(() => { if (!started) fail(); }, 4000);
+  player.onplaying = () => {
+    player.playbackRate = rate;
+    started = true;
+    clearTimeout(timer);
+    row.classList.add("speaking");
+    setNote("Playing: " + label);
+  };
+  player.onended = () => row.classList.remove("speaking");
+  player.onerror = fail;
+
+  player.src = url;
+  player.defaultPlaybackRate = rate;
+  player.playbackRate = rate;
+  player.preservesPitch = true;
+  player.play().catch(fail);
+}
+
+async function speak(word, slow = false) {
+  const token = ++speakToken;
+  stopAudio();
+  setNote("");
+
+  const useBrowser = reason => {
+    if (token !== speakToken) return;
+    setNote((reason ? reason + ". " : "") + "Playing: Browser voice");
+    speakFallback(word, slow ? 0.5 : 0.85);
+  };
+
+  if (voiceSetting === "browser") return useBrowser("");
+
+  let url, label, rate = 1;
+  try {
+    if (voiceSetting === "google") {
+      url = "https://translate.google.com/translate_tts?ie=UTF-8&client=tw-ob&tl=en-US&q=" + encodeURIComponent(word) + (slow ? "&ttsspeed=0.3" : "");
+      label = "Google";
+    } else if (voiceSetting === "piper") {
+      url = await engineSource(piper, piperVoice, 1, word);
+      label = "Piper";
+      rate = slow ? 0.75 : 1;   // Piper has no speed setting, so slow it down while playing
+    } else {
+      url = await engineSource(kokoro, kokoroVoice, slow ? SPEED_SLOW : SPEED_NORMAL, word);
+      label = "Kokoro";
+    }
+  } catch (e) {
+    return useBrowser(e.message);
+  }
+
+  if (token !== speakToken) return;
+  playUrl(url, token, label, () => useBrowser("Selected voice unavailable"), rate);
+}
+
+/* ---------- Random word picking ---------- */
+function shuffle(arr) {
+  const a = arr.slice();
+  for (let i = a.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [a[i], a[j]] = [a[j], a[i]];
+  }
+  return a;
+}
+
+function refill() {
+  queue = shuffle(WORDS[level]);
+  if (queue.length > 1 && queue[queue.length - 1] === current) queue.reverse(); // avoid immediate repeat
+}
+
+function nextWord() {
+  if (queue.length === 0) refill();
+  return queue.pop();
+}
+
+// Generate the next word's audio in the background while the player is on this word
+function preloadNext() {
+  const e = activeEngine();
+  if (!e || e.state !== "ready") return;
+  if (queue.length === 0) refill();
+  const speed = voiceSetting === "kokoro" ? SPEED_NORMAL : 1;
+  e.url(queue[queue.length - 1], activeVoice(), speed).catch(() => {});
+}
+
+/* ---------- Game flow ---------- */
+function newRound() {
+  current = nextWord();
+  locked = false;
+  answer.value = "";
+  answer.disabled = false;
+  answer.className = "";
+  feedback.textContent = "";
+  feedback.className = "";
+  answer.focus();
+  speak(current);
+  preloadNext();
+}
+
+function startGame() {
+  if (!WORDS) return;
+  score = 0; streak = 0;
+  queue = [];
+  current = "";
+  $("score").textContent = 0;
+  $("streak").textContent = 0;
+  $("levelLabel").textContent = level[0].toUpperCase() + level.slice(1);
+  menu.classList.add("hidden");
+  game.classList.remove("hidden");
+  newRound();
+}
+
+// Costs 1 streak point (never below 0) to hear the typed text read aloud
+function hearTyped() {
+  if (locked) return;
+  const typed = answer.value.trim();
+  if (!typed) {
+    feedback.textContent = "Type something first.";
+    feedback.className = "";
+    answer.focus();
+    return;
+  }
+  const lost = streak > 0;
+  if (lost) {
+    streak--;
+    $("streak").textContent = streak;
+  }
+  feedback.textContent = lost ? "Streak -1" : "Playing what you typed";
+  feedback.className = "";
+  speak(typed);
+  answer.focus();
+}
+
+function check() {
+  if (locked) return;
+  const guess = answer.value.trim().toLowerCase();
+  if (!guess) return;
+
+  if (guess === current.toLowerCase()) {
+    locked = true;
+    score++; streak++;
+    $("score").textContent = score;
+    $("streak").textContent = streak;
+    answer.className = "ok";
+    answer.disabled = true;
+    feedback.textContent = "Correct!";
+    feedback.className = "ok";
+    setTimeout(newRound, 900);
+  } else {
+    streak = 0;
+    $("streak").textContent = 0;
+    // restart the shake animation
+    answer.className = "";
+    void answer.offsetWidth;
+    answer.className = "bad";
+    feedback.textContent = "Not quite. Listen again and try once more.";
+    feedback.className = "bad";
+    answer.select();
+  }
+}
+
+/* ---------- Events ---------- */
+document.querySelectorAll(".level").forEach(btn => {
+  btn.addEventListener("click", () => {
+    level = btn.dataset.level;
+    document.querySelectorAll(".level").forEach(b =>
+      b.setAttribute("aria-pressed", b === btn ? "true" : "false"));
+  });
+});
+
+$("startBtn").addEventListener("click", startGame);
+$("playBtn").addEventListener("click", () => { speak(current); answer.focus(); });
+$("slowBtn").addEventListener("click", () => { speak(current, true); answer.focus(); });
+$("checkBtn").addEventListener("click", check);
+$("hearBtn").addEventListener("click", hearTyped);
+answer.addEventListener("keydown", e => { if (e.key === "Enter") check(); });
+answer.addEventListener("input", () => {
+  if (!locked) { answer.className = ""; feedback.textContent = ""; }
+});
+$("menuBtn").addEventListener("click", () => {
+  speakToken++;
+  stopAudio();
+  setNote("");
+  game.classList.add("hidden");
+  menu.classList.remove("hidden");
+});
+
+/* ---------- Start ---------- */
+refreshSettingsUI();
+startActiveEngine();
+</script>
 </body>
 </html>
