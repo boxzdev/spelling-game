@@ -75,10 +75,12 @@
 
   /* Settings */
   .setting { margin-bottom: 20px; }
-  .setting label { display: block; margin-bottom: 6px; font-size: .9rem; color: var(--muted); }
+  .setting label { display: block; margin: 12px 0 6px; font-size: .9rem; color: var(--muted); }
+  .setting label:first-child { margin-top: 0; }
   .setting .row { display: flex; gap: 8px; }
   select {
     flex: 1;
+    width: 100%;
     font: inherit;
     color: inherit;
     background: var(--bg);
@@ -156,15 +158,26 @@
       <label for="voiceSel">Voice</label>
       <div class="row">
         <select id="voiceSel">
-          <option value="auto">Auto (best available)</option>
-          <option value="kokoro">Kokoro (audio files)</option>
-          <option value="piper">Piper (audio files)</option>
+          <option value="kokoro">Kokoro (AI, in your browser)</option>
           <option value="google">Google (online)</option>
           <option value="browser">Browser voice</option>
         </select>
         <button id="testBtn" type="button">Test</button>
       </div>
+
+      <div id="kvoiceWrap">
+        <label for="kvoiceSel">Kokoro voice</label>
+        <select id="kvoiceSel">
+          <option value="af_heart">Heart (female, US)</option>
+          <option value="af_bella">Bella (female, US)</option>
+          <option value="am_michael">Michael (male, US)</option>
+          <option value="bf_emma">Emma (female, UK)</option>
+          <option value="bm_george">George (male, UK)</option>
+        </select>
+      </div>
+
       <p class="hint" id="voiceHint"></p>
+      <p class="note" id="modelNote"></p>
       <p class="note" id="testNote"></p>
     </div>
 
@@ -207,7 +220,7 @@ let queue = [];
 let current = "";
 let score = 0, streak = 0;
 let locked = false;
-let voice = null;
+let browserVoice = null;
 
 const hasTTS = "speechSynthesis" in window;
 
@@ -236,32 +249,44 @@ async function loadWords() {
 }
 loadWords();
 
-/* ---------- Voice settings ---------- */
-const VOICE_KEY = "spelling.voice";
+/* ---------- Settings ---------- */
 const HINTS = {
-  auto:    "Tries Kokoro files, then Piper files, then Google, then your browser's voice.",
-  kokoro:  "Plays files from audio/kokoro/ (made with generate_audio.py).",
-  piper:   "Plays files from audio/piper/ (made with generate_audio.py).",
+  kokoro:  "Natural AI voice that runs inside your browser. Downloads about 90 MB the first time, then it's saved.",
   google:  "Needs internet. Natural sounding, but it's an unofficial service.",
   browser: "Your device's built-in voice. Works offline."
 };
-let voiceSetting = "auto";
+const KOKORO_VOICES = ["af_heart", "af_bella", "am_michael", "bf_emma", "bm_george"];
+
+let voiceSetting = "kokoro";
+let kokoroVoice = "af_heart";
 try {
-  const saved = localStorage.getItem(VOICE_KEY);
-  if (saved && HINTS[saved]) voiceSetting = saved;
+  const v = localStorage.getItem("spelling.voice");
+  const kv = localStorage.getItem("spelling.kvoice");
+  if (v && HINTS[v]) voiceSetting = v;
+  if (kv && KOKORO_VOICES.includes(kv)) kokoroVoice = kv;
 } catch (e) {}
 
-const dead = new Set(); // in Auto mode: sources that failed, so we stop trying them
+function save(key, val) { try { localStorage.setItem(key, val); } catch (e) {} }
 
-$("voiceSel").value = voiceSetting;
-$("voiceHint").textContent = HINTS[voiceSetting];
+function refreshSettingsUI() {
+  $("voiceSel").value = voiceSetting;
+  $("kvoiceSel").value = kokoroVoice;
+  $("kvoiceWrap").classList.toggle("hidden", voiceSetting !== "kokoro");
+  $("voiceHint").textContent = HINTS[voiceSetting];
+  showModel();
+}
 
 $("voiceSel").addEventListener("change", e => {
   voiceSetting = e.target.value;
-  try { localStorage.setItem(VOICE_KEY, voiceSetting); } catch (err) {}
-  dead.clear();
-  $("voiceHint").textContent = HINTS[voiceSetting];
+  save("spelling.voice", voiceSetting);
   setNote("");
+  if (voiceSetting === "kokoro") ensureKokoro().catch(() => {});
+  refreshSettingsUI();
+});
+
+$("kvoiceSel").addEventListener("change", e => {
+  kokoroVoice = e.target.value;
+  save("spelling.kvoice", kokoroVoice);
 });
 
 $("testBtn").addEventListener("click", () => {
@@ -274,55 +299,139 @@ function setNote(msg) {
   $("testNote").textContent = msg;
 }
 
-/* ---------- Text to speech ---------- */
-const audioCache = {};   // url -> Audio element (also used for preloading)
-let player = null;
+/* ---------- Kokoro (runs in the browser) ---------- */
+let kokoroState = "idle";   // idle | loading | ready | error
+let kokoroPct = 0;
+let kokoroError = "";
+let kokoroTTS = null;
+let kokoroPromise = null;
+let kokoroChain = Promise.resolve();   // generate one word at a time
+const kokoroCache = {};                // "voice|word" -> Promise<blob url>
+const fileProgress = {};
+
+function showModel() {
+  const el = $("modelNote");
+  if (voiceSetting !== "kokoro") { el.textContent = ""; return; }
+  if (kokoroState === "loading") el.textContent = "Loading voice model... " + kokoroPct + "%";
+  else if (kokoroState === "ready") el.textContent = "Voice model ready.";
+  else if (kokoroState === "error") el.textContent = "Couldn't load the voice model (" + kokoroError + "). Try Google or Browser voice.";
+  else el.textContent = "";
+}
+
+function ensureKokoro() {
+  if (kokoroPromise) return kokoroPromise;
+  kokoroState = "loading";
+  kokoroPct = 0;
+  showModel();
+
+  kokoroPromise = (async () => {
+    const { KokoroTTS } = await import("https://cdn.jsdelivr.net/npm/kokoro-js@1/+esm");
+    const tts = await KokoroTTS.from_pretrained("onnx-community/Kokoro-82M-v1.0-ONNX", {
+      dtype: "q8",
+      device: "wasm",
+      progress_callback: p => {
+        if (p.status === "progress" && p.total) {
+          fileProgress[p.file] = { loaded: p.loaded, total: p.total };
+          let l = 0, t = 0;
+          for (const f of Object.values(fileProgress)) { l += f.loaded; t += f.total; }
+          kokoroPct = Math.min(99, Math.round((l / t) * 100));
+          showModel();
+        }
+      }
+    });
+    kokoroTTS = tts;
+    kokoroState = "ready";
+    showModel();
+    return tts;
+  })().catch(err => {
+    kokoroState = "error";
+    kokoroError = (err && err.message) ? err.message : String(err);
+    kokoroPromise = null;   // allow retry
+    showModel();
+    throw err;
+  });
+  return kokoroPromise;
+}
+
+function toWavBlob(audio) {
+  if (typeof audio.toBlob === "function") return audio.toBlob();
+  const samples = audio.audio, sr = audio.sampling_rate;
+  const buf = new ArrayBuffer(44 + samples.length * 2);
+  const v = new DataView(buf);
+  const w = (o, s) => { for (let i = 0; i < s.length; i++) v.setUint8(o + i, s.charCodeAt(i)); };
+  w(0, "RIFF"); v.setUint32(4, 36 + samples.length * 2, true); w(8, "WAVE"); w(12, "fmt ");
+  v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, 1, true);
+  v.setUint32(24, sr, true); v.setUint32(28, sr * 2, true); v.setUint16(32, 2, true); v.setUint16(34, 16, true);
+  w(36, "data"); v.setUint32(40, samples.length * 2, true);
+  for (let i = 0; i < samples.length; i++) {
+    const s = Math.max(-1, Math.min(1, samples[i]));
+    v.setInt16(44 + i * 2, s < 0 ? s * 0x8000 : s * 0x7fff, true);
+  }
+  return new Blob([buf], { type: "audio/wav" });
+}
+
+function kokoroUrl(word) {
+  const voiceId = kokoroVoice;
+  const key = voiceId + "|" + word;
+  if (!kokoroCache[key]) {
+    const p = kokoroChain.then(async () => {
+      const audio = await kokoroTTS.generate(word, { voice: voiceId, speed: 0.9 });
+      return URL.createObjectURL(toWavBlob(audio));
+    });
+    kokoroChain = p.catch(() => {});
+    p.catch(() => { delete kokoroCache[key]; });
+    kokoroCache[key] = p;
+  }
+  return kokoroCache[key];
+}
+
+async function kokoroSource(word) {
+  if (kokoroState === "error") throw new Error("Kokoro couldn't load");
+  if (kokoroState !== "ready") {
+    ensureKokoro().catch(() => {});
+    throw new Error("Voice model still loading (" + kokoroPct + "%)");
+  }
+  if (!kokoroCache[kokoroVoice + "|" + word]) setNote("Generating voice...");
+  return await Promise.race([
+    kokoroUrl(word),
+    new Promise((_, reject) => setTimeout(() => reject(new Error("Voice took too long")), 8000))
+  ]);
+}
+
+/* ---------- Playing audio ---------- */
+const player = new Audio();       // one shared element, so mobile browsers keep it unlocked
 let speakToken = 0;
 
-function pickVoice() {
+// Mobile browsers only allow audio after a tap. Unlock the player on the first tap.
+const SILENT = "data:audio/wav;base64,UklGRigAAABXQVZFZm10IBAAAAABAAEARKwAAIhYAQACABAAAABkYXRhAgAAAAEA";
+let unlocked = false;
+function unlockAudio() {
+  if (unlocked) return;
+  unlocked = true;
+  player.src = SILENT;
+  player.play().then(() => { if (player.src === SILENT) player.pause(); }).catch(() => {});
+}
+["click", "touchend", "keydown"].forEach(ev =>
+  document.addEventListener(ev, unlockAudio, { capture: true, passive: true }));
+
+function pickBrowserVoice() {
   if (!hasTTS) return;
   const good = ["natural", "online", "premium", "enhanced", "google us", "samantha", "aria", "jenny", "ava"];
-  const score = v => {
+  const rank = v => {
     const n = v.name.toLowerCase();
     return (good.some(g => n.includes(g)) ? 10 : 0) + (v.lang === "en-US" ? 2 : 0);
   };
-  voice = speechSynthesis.getVoices()
+  browserVoice = speechSynthesis.getVoices()
     .filter(v => v.lang.startsWith("en"))
-    .sort((a, b) => score(b) - score(a))[0] || null;
+    .sort((a, b) => rank(b) - rank(a))[0] || null;
 }
 if (hasTTS) {
-  pickVoice();
-  speechSynthesis.addEventListener("voiceschanged", pickVoice);
-}
-
-// Which audio URLs to try, in order, for the chosen voice.
-// The browser voice is always the last resort (handled in speak()).
-function candidates(word) {
-  const file = encodeURIComponent(word.toLowerCase());
-  const all = {
-    kokoro: { src: "kokoro", url: "audio/kokoro/" + file + ".wav" },
-    piper:  { src: "piper",  url: "audio/piper/" + file + ".wav" },
-    google: { src: "google", url: "https://translate.google.com/translate_tts?ie=UTF-8&client=tw-ob&tl=en-US&q=" + encodeURIComponent(word) }
-  };
-  if (voiceSetting === "browser") return [];
-  if (voiceSetting === "auto") {
-    return ["kokoro", "piper", "google"].filter(s => !dead.has(s)).map(s => all[s]);
-  }
-  return [all[voiceSetting]];
-}
-
-function getAudio(url) {
-  if (!audioCache[url]) {
-    const a = new Audio();
-    a.preload = "auto";
-    a.src = url;
-    audioCache[url] = a;
-  }
-  return audioCache[url];
+  pickBrowserVoice();
+  speechSynthesis.addEventListener("voiceschanged", pickBrowserVoice);
 }
 
 function stopAudio() {
-  if (player) { player.pause(); player = null; }
+  player.pause();
   if (hasTTS) speechSynthesis.cancel();
   $("playRow").classList.remove("speaking");
 }
@@ -332,54 +441,71 @@ function speakFallback(word, rate) {
   const u = new SpeechSynthesisUtterance(word);
   u.lang = "en-US";
   u.rate = rate;
-  if (voice) u.voice = voice;
+  if (browserVoice) u.voice = browserVoice;
   const row = $("playRow");
   u.onstart = () => row.classList.add("speaking");
   u.onend = u.onerror = () => row.classList.remove("speaking");
   speechSynthesis.speak(u);
 }
 
-function speak(word, rate = 0.85) {
+function playUrl(url, rate, token, label, onFail) {
+  const row = $("playRow");
+  const pr = rate < 0.7 ? 0.7 : 1;
+  let started = false;
+  let timer = null;
+
+  const fail = () => {
+    if (token !== speakToken) return;
+    clearTimeout(timer);
+    player.onplaying = player.onended = player.onerror = null;
+    player.pause();
+    onFail();
+  };
+
+  timer = setTimeout(() => { if (!started) fail(); }, 4000);
+  player.onplaying = () => {
+    started = true;
+    clearTimeout(timer);
+    row.classList.add("speaking");
+    setNote("Playing: " + label);
+  };
+  player.onended = () => row.classList.remove("speaking");
+  player.onerror = fail;
+
+  player.src = url;
+  player.defaultPlaybackRate = pr;
+  player.playbackRate = pr;
+  player.play().catch(fail);
+}
+
+async function speak(word, rate = 0.85) {
   const token = ++speakToken;
   stopAudio();
   setNote("");
-  const row = $("playRow");
-  const list = candidates(word);
 
-  function tryNext(i) {
+  const useBrowser = reason => {
     if (token !== speakToken) return;
-    if (i >= list.length) {
-      if (list.length) setNote("Selected voice unavailable, using browser voice.");
-      speakFallback(word, rate);
-      return;
+    setNote((reason ? reason + ". " : "") + "Playing: Browser voice");
+    speakFallback(word, rate);
+  };
+
+  if (voiceSetting === "browser") return useBrowser("");
+
+  let url, label;
+  try {
+    if (voiceSetting === "google") {
+      url = "https://translate.google.com/translate_tts?ie=UTF-8&client=tw-ob&tl=en-US&q=" + encodeURIComponent(word);
+      label = "Google";
+    } else {
+      url = await kokoroSource(word);
+      label = "Kokoro";
     }
-
-    const { src, url } = list[i];
-    const a = getAudio(url);
-    player = a;
-    a.currentTime = 0;
-    a.playbackRate = rate < 0.7 ? 0.7 : 1;
-
-    let started = false;
-    let timer = null;
-    const fail = markDead => {
-      if (token !== speakToken) return;
-      clearTimeout(timer);
-      a.onplaying = a.onended = a.onerror = null;
-      a.pause();
-      delete audioCache[url];
-      if (markDead && voiceSetting === "auto") dead.add(src);
-      tryNext(i + 1);
-    };
-
-    timer = setTimeout(() => { if (!started) fail(false); }, 3000);
-    a.onplaying = () => { started = true; clearTimeout(timer); row.classList.add("speaking"); };
-    a.onended = () => row.classList.remove("speaking");
-    a.onerror = () => fail(true);
-    a.play().catch(() => fail(false));
+  } catch (e) {
+    return useBrowser(e.message);
   }
 
-  tryNext(0);
+  if (token !== speakToken) return;
+  playUrl(url, rate, token, label, () => useBrowser("Selected voice unavailable"));
 }
 
 /* ---------- Random word picking ---------- */
@@ -402,11 +528,11 @@ function nextWord() {
   return queue.pop();
 }
 
-// Start loading the next word's audio while the player is still on this one
+// Generate the next word's audio in the background while the player is on this word
 function preloadNext() {
+  if (voiceSetting !== "kokoro" || kokoroState !== "ready") return;
   if (queue.length === 0) refill();
-  const c = candidates(queue[queue.length - 1])[0];
-  if (c) getAudio(c.url);
+  kokoroUrl(queue[queue.length - 1]).catch(() => {});
 }
 
 /* ---------- Game flow ---------- */
@@ -488,6 +614,10 @@ $("menuBtn").addEventListener("click", () => {
   game.classList.add("hidden");
   menu.classList.remove("hidden");
 });
+
+/* ---------- Start ---------- */
+refreshSettingsUI();
+if (voiceSetting === "kokoro") ensureKokoro().catch(() => {});
 </script>
 </body>
 </html>
