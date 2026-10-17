@@ -117,8 +117,11 @@
     margin-bottom: 12px;
     transition: border-color .2s;
   }
-  .secondary { width: 100%; margin-bottom: 12px; color: var(--muted); }
-  .secondary:hover { color: var(--fg); }
+  .tools { display: flex; justify-content: center; gap: 8px; margin-bottom: 6px; }
+  .tool { width: 40px; height: 40px; padding: 0; font-weight: 600; color: var(--muted); }
+  .tool:hover:not(:disabled) { color: var(--fg); }
+  #clue { text-align: center; min-height: 1.4em; margin: 0 0 8px; color: var(--fg); }
+  #toolHint { text-align: center; margin: 0 0 12px; }
   input.ok { border-color: var(--good); }
   input.bad { border-color: var(--bad); animation: shake .35s; }
 
@@ -212,8 +215,13 @@
     </div>
     <p class="note" id="voiceNote"></p>
 
+    <p id="clue" role="status" aria-live="polite"></p>
     <input type="text" id="answer" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" aria-label="Type the spelling" placeholder="Type the word">
-    <button class="secondary" id="hearBtn" type="button" disabled title="Needs a streak of at least 1">Hear what I typed (-1 streak)</button>
+    <div class="tools">
+      <button class="tool" id="hearBtn" type="button" disabled title="Hear what I typed (-1 streak)" aria-label="Hear what I typed, costs 1 streak">H</button>
+      <button class="tool" id="clueBtn" type="button" disabled title="Clue: how many letters (-1 streak)" aria-label="Clue: how many letters, costs 1 streak">L</button>
+    </div>
+    <p class="note" id="toolHint">H = hear what you typed &nbsp; L = letter count &nbsp; (each costs 1 streak)</p>
     <button class="primary" id="checkBtn">Check</button>
     <p id="feedback" role="status" aria-live="polite"></p>
 
@@ -235,6 +243,7 @@ let queue = [];
 let current = "";
 let score = 0, streak = 0;
 let locked = false;
+let clueUsed = false;
 let browserVoice = null;
 
 const hasTTS = "speechSynthesis" in window;
@@ -720,12 +729,14 @@ function preloadNext() {
 function newRound() {
   current = nextWord();
   locked = false;
+  clueUsed = false;
+  $("clue").textContent = "";
   answer.value = "";
   answer.disabled = false;
   answer.className = "";
   feedback.textContent = "";
   feedback.className = "";
-  updateHearBtn();
+  updateToolBtns();
   answer.focus();
   speak(current);
   preloadNext();
@@ -738,16 +749,17 @@ function startGame() {
   current = "";
   $("score").textContent = 0;
   $("streak").textContent = 0;
-  updateHearBtn();
+  updateToolBtns();
   $("levelLabel").textContent = level[0].toUpperCase() + level.slice(1);
   menu.classList.add("hidden");
   game.classList.remove("hidden");
   newRound();
 }
 
-// The hear button only works while you have a streak to spend
-function updateHearBtn() {
+// The H and L buttons only work while you have a streak to spend
+function updateToolBtns() {
   $("hearBtn").disabled = streak < 1;
+  $("clueBtn").disabled = streak < 1 || clueUsed;
 }
 
 // Costs 1 streak point to hear the typed text read aloud
@@ -762,10 +774,23 @@ function hearTyped() {
   }
   streak--;
   $("streak").textContent = streak;
-  updateHearBtn();
+  updateToolBtns();
   feedback.textContent = "Streak -1";
   feedback.className = "";
   speak(typed);
+  answer.focus();
+}
+
+// Costs 1 streak point to see how many letters the word has (once per word)
+function giveClue() {
+  if (locked || clueUsed || streak < 1) return;
+  clueUsed = true;
+  streak--;
+  $("streak").textContent = streak;
+  updateToolBtns();
+  $("clue").textContent = "Clue: " + current.length + " letters";
+  feedback.textContent = "Streak -1";
+  feedback.className = "";
   answer.focus();
 }
 
@@ -779,7 +804,7 @@ function check() {
     score++; streak++;
     $("score").textContent = score;
     $("streak").textContent = streak;
-    updateHearBtn();
+    updateToolBtns();
     answer.className = "ok";
     answer.disabled = true;
     feedback.textContent = "Correct!";
@@ -788,7 +813,7 @@ function check() {
   } else {
     streak = 0;
     $("streak").textContent = 0;
-    updateHearBtn();
+    updateToolBtns();
     // restart the shake animation
     answer.className = "";
     void answer.offsetWidth;
@@ -813,6 +838,7 @@ $("playBtn").addEventListener("click", () => { speak(current); answer.focus(); }
 $("slowBtn").addEventListener("click", () => { speak(current, true); answer.focus(); });
 $("checkBtn").addEventListener("click", check);
 $("hearBtn").addEventListener("click", hearTyped);
+$("clueBtn").addEventListener("click", giveClue);
 answer.addEventListener("keydown", e => { if (e.key === "Enter") check(); });
 answer.addEventListener("input", () => {
   if (!locked) { answer.className = ""; feedback.textContent = ""; }
