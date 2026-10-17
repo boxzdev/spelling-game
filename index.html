@@ -59,6 +59,7 @@
     transition: border-color .15s, background-color .15s;
   }
   button:hover { border-color: var(--fg); }
+  button:disabled { opacity: .5; cursor: default; }
   button:focus-visible, input:focus-visible { outline: 2px solid var(--fg); outline-offset: 2px; }
 
   .hidden { display: none; }
@@ -70,6 +71,7 @@
   .level[aria-pressed="true"] { border-color: var(--fg); background: rgba(128,128,128,.12); }
   .primary { width: 100%; background: var(--fg); color: var(--bg); border-color: var(--fg); }
   .primary:hover { opacity: .85; }
+  #loadError { margin: 16px 0 0; color: var(--bad); }
 
   /* Game */
   .top { display: flex; justify-content: space-between; color: var(--muted); font-size: .9rem; margin-bottom: 28px; }
@@ -131,10 +133,8 @@
       <button class="level" data-level="normal" aria-pressed="true">Normal <span>trickier words</span></button>
       <button class="level" data-level="hard" aria-pressed="false">Hard <span>tough words</span></button>
     </div>
-    <button class="primary" id="startBtn">Start</button>
-    <p id="unsupported" class="hidden" style="margin-top:16px;color:var(--bad)">
-      Your browser doesn't support text-to-speech, so the game can't play audio.
-    </p>
+    <button class="primary" id="startBtn" disabled>Loading words...</button>
+    <p id="loadError" class="hidden"></p>
   </section>
 
   <!-- Game -->
@@ -161,37 +161,11 @@
 </main>
 
 <script>
-const WORDS = {
-  easy: [
-    "because","friend","school","water","happy","animal","family","garden","orange","purple",
-    "mother","yellow","window","people","simple","little","summer","winter","flower","button",
-    "monkey","pencil","rabbit","bridge","cookie","dinner","finger","jungle","kitchen","laugh",
-    "listen","number","market","planet","rocket","sister","tiger","wonder","zebra","bread",
-    "clock","dragon","earth","finish","ground","house","island","pocket","queen","shadow"
-  ],
-  normal: [
-    "separate","definitely","necessary","calendar","environment","government","library","beautiful",
-    "restaurant","argument","believe","receive","weird","tomorrow","recommend","occasion","embarrass",
-    "grammar","height","immediately","knowledge","maintenance","neighbor","parallel","schedule",
-    "success","surprise","temperature","vacuum","whether","address","business","character","daughter",
-    "exercise","favorite","guarantee","interesting","jewelry","language","mountain","opposite",
-    "package","question","relevant","strength","through","unusual","village","yesterday"
-  ],
-  hard: [
-    "accommodate","conscientious","entrepreneur","onomatopoeia","rhythm","pneumonia","maneuver",
-    "mnemonic","miscellaneous","bureaucracy","conscience","questionnaire","surveillance","silhouette",
-    "camaraderie","liaison","pharaoh","psychology","supersede","threshold","ubiquitous","vengeance",
-    "xylophone","phenomenon","idiosyncrasy","minuscule","occurrence","perseverance","quarantine",
-    "reconnaissance","sacrilegious","tyranny","unanimous","bourgeoisie","chauffeur","cemetery",
-    "connoisseur","dilemma","ephemeral","fluorescent","hierarchy","hypocrisy","indict","lieutenant",
-    "mischievous","obsolete","paraphernalia","rendezvous","guarantee","acquiesce"
-  ]
-};
-
 const $ = id => document.getElementById(id);
 const menu = $("menu"), game = $("game");
 const answer = $("answer"), feedback = $("feedback");
 
+let WORDS = null;          // loaded from words.json
 let level = "normal";
 let queue = [];
 let current = "";
@@ -200,24 +174,78 @@ let locked = false;
 let voice = null;
 
 const hasTTS = "speechSynthesis" in window;
-if (!hasTTS) $("unsupported").classList.remove("hidden");
+
+/* ---------- Load words from words.json ---------- */
+async function loadWords() {
+  const startBtn = $("startBtn");
+  try {
+    const res = await fetch("words.json");
+    if (!res.ok) throw new Error("HTTP " + res.status);
+    const data = await res.json();
+    for (const k of ["easy", "normal", "hard"]) {
+      if (!Array.isArray(data[k]) || data[k].length === 0) {
+        throw new Error('Missing or empty list: "' + k + '"');
+      }
+    }
+    WORDS = data;
+    startBtn.disabled = false;
+    startBtn.textContent = "Start";
+  } catch (err) {
+    startBtn.textContent = "Start";
+    const box = $("loadError");
+    box.textContent = "Couldn't load words.json (" + err.message + "). " +
+      "Make sure it's next to index.html and the page is opened through a web server or GitHub Pages, not as a local file.";
+    box.classList.remove("hidden");
+  }
+}
+loadWords();
 
 /* ---------- Text to speech ---------- */
+const audioCache = {};
+let player = null;
+let speakToken = 0;
+
 function pickVoice() {
   if (!hasTTS) return;
-  const voices = speechSynthesis.getVoices();
-  voice = voices.find(v => v.lang === "en-US" && v.localService)
-       || voices.find(v => v.lang.startsWith("en"))
-       || null;
+  const good = ["natural", "online", "premium", "enhanced", "google us", "samantha", "aria", "jenny", "ava"];
+  const score = v => {
+    const n = v.name.toLowerCase();
+    return (good.some(g => n.includes(g)) ? 10 : 0) + (v.lang === "en-US" ? 2 : 0);
+  };
+  voice = speechSynthesis.getVoices()
+    .filter(v => v.lang.startsWith("en"))
+    .sort((a, b) => score(b) - score(a))[0] || null;
 }
 if (hasTTS) {
   pickVoice();
   speechSynthesis.addEventListener("voiceschanged", pickVoice);
 }
 
-function speak(word, rate = 0.85) {
+async function getAudioUrl(word) {
+  if (word in audioCache) return audioCache[word];
+  try {
+    const r = await fetch("https://api.dictionaryapi.dev/api/v2/entries/en/" + encodeURIComponent(word));
+    if (!r.ok) throw new Error("not found");
+    const data = await r.json();
+    const urls = data
+      .flatMap(e => (e.phonetics || []).map(p => p.audio))
+      .filter(Boolean)
+      .map(u => (u.startsWith("//") ? "https:" + u : u));
+    audioCache[word] = urls.find(u => u.includes("-us")) || urls[0] || null;
+  } catch (e) {
+    audioCache[word] = null;
+  }
+  return audioCache[word];
+}
+
+function stopAudio() {
+  if (player) { player.pause(); player = null; }
+  if (hasTTS) speechSynthesis.cancel();
+  $("playRow").classList.remove("speaking");
+}
+
+function speakFallback(word, rate) {
   if (!hasTTS) return;
-  speechSynthesis.cancel();
   const u = new SpeechSynthesisUtterance(word);
   u.lang = "en-US";
   u.rate = rate;
@@ -226,6 +254,26 @@ function speak(word, rate = 0.85) {
   u.onstart = () => row.classList.add("speaking");
   u.onend = u.onerror = () => row.classList.remove("speaking");
   speechSynthesis.speak(u);
+}
+
+async function speak(word, rate = 0.85) {
+  const token = ++speakToken;
+  stopAudio();
+  const url = await getAudioUrl(word);
+  if (token !== speakToken) return;
+  if (url) {
+    const row = $("playRow");
+    player = new Audio(url);
+    player.playbackRate = rate < 0.7 ? 0.7 : 1;
+    player.onplaying = () => row.classList.add("speaking");
+    player.onended = () => row.classList.remove("speaking");
+    player.play().catch(() => {
+      row.classList.remove("speaking");
+      if (token === speakToken) speakFallback(word, rate);
+    });
+  } else {
+    speakFallback(word, rate);
+  }
 }
 
 /* ---------- Random word picking ---------- */
@@ -260,6 +308,7 @@ function newRound() {
 }
 
 function startGame() {
+  if (!WORDS) return;
   score = 0; streak = 0;
   queue = [];
   current = "";
@@ -276,7 +325,7 @@ function check() {
   const guess = answer.value.trim().toLowerCase();
   if (!guess) return;
 
-  if (guess === current) {
+  if (guess === current.toLowerCase()) {
     locked = true;
     score++; streak++;
     $("score").textContent = score;
@@ -317,7 +366,7 @@ answer.addEventListener("input", () => {
   if (!locked) { answer.className = ""; feedback.textContent = ""; }
 });
 $("menuBtn").addEventListener("click", () => {
-  if (hasTTS) speechSynthesis.cancel();
+  stopAudio();
   game.classList.add("hidden");
   menu.classList.remove("hidden");
 });
