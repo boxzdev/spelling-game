@@ -299,15 +299,60 @@ function setNote(msg) {
   $("testNote").textContent = msg;
 }
 
-/* ---------- Kokoro (runs in the browser) ---------- */
+/* ---------- Kokoro (runs in a background worker so the page stays smooth) ---------- */
 let kokoroState = "idle";   // idle | loading | ready | error
 let kokoroPct = 0;
 let kokoroError = "";
-let kokoroTTS = null;
 let kokoroPromise = null;
+let kokoroWorker = null;
 let kokoroChain = Promise.resolve();   // generate one word at a time
 const kokoroCache = {};                // "voice|word" -> Promise<blob url>
-const fileProgress = {};
+const pending = {};
+let nextId = 1;
+
+// This code runs in a separate thread, so downloading and generating never freeze the page.
+const WORKER_SRC = `
+import { KokoroTTS } from "https://cdn.jsdelivr.net/npm/kokoro-js@1/+esm";
+
+let tts = null;
+const files = {};
+let lastPost = 0;
+
+self.onmessage = async (e) => {
+  const m = e.data;
+  try {
+    if (m.type === "init") {
+      tts = await KokoroTTS.from_pretrained("onnx-community/Kokoro-82M-v1.0-ONNX", {
+        dtype: "q8",
+        device: "wasm",
+        progress_callback: (p) => {
+          if (p.status === "progress" && p.total) {
+            files[p.file] = { loaded: p.loaded, total: p.total };
+            const now = Date.now();
+            if (now - lastPost > 250) {
+              lastPost = now;
+              let l = 0, t = 0;
+              for (const f of Object.values(files)) { l += f.loaded; t += f.total; }
+              self.postMessage({ type: "progress", pct: Math.min(99, Math.round((l / t) * 100)) });
+            }
+          }
+        }
+      });
+      self.postMessage({ type: "ready" });
+    } else if (m.type === "generate") {
+      const audio = await tts.generate(m.text, { voice: m.voice, speed: m.speed });
+      if (audio.audio) {
+        const samples = new Float32Array(audio.audio);
+        self.postMessage({ type: "audio", id: m.id, samples: samples, sr: audio.sampling_rate }, [samples.buffer]);
+      } else {
+        self.postMessage({ type: "audio", id: m.id, blob: audio.toBlob() });
+      }
+    }
+  } catch (err) {
+    self.postMessage({ type: "error", id: m.id, message: String((err && err.message) || err) });
+  }
+};
+`;
 
 function showModel() {
   const el = $("modelNote");
@@ -324,59 +369,81 @@ function ensureKokoro() {
   kokoroPct = 0;
   showModel();
 
-  kokoroPromise = (async () => {
-    const { KokoroTTS } = await import("https://cdn.jsdelivr.net/npm/kokoro-js@1/+esm");
-    const tts = await KokoroTTS.from_pretrained("onnx-community/Kokoro-82M-v1.0-ONNX", {
-      dtype: "q8",
-      device: "wasm",
-      progress_callback: p => {
-        if (p.status === "progress" && p.total) {
-          fileProgress[p.file] = { loaded: p.loaded, total: p.total };
-          let l = 0, t = 0;
-          for (const f of Object.values(fileProgress)) { l += f.loaded; t += f.total; }
-          kokoroPct = Math.min(99, Math.round((l / t) * 100));
-          showModel();
-        }
+  kokoroPromise = new Promise((resolve, reject) => {
+    try {
+      const blobUrl = URL.createObjectURL(new Blob([WORKER_SRC], { type: "text/javascript" }));
+      kokoroWorker = new Worker(blobUrl, { type: "module" });
+    } catch (err) {
+      reject(err);
+      return;
+    }
+
+    kokoroWorker.onmessage = e => {
+      const m = e.data;
+      if (m.type === "progress") {
+        kokoroPct = m.pct;
+        showModel();
+      } else if (m.type === "ready") {
+        kokoroState = "ready";
+        showModel();
+        resolve();
+      } else if (m.type === "audio") {
+        const p = pending[m.id];
+        if (p) { delete pending[m.id]; p.resolve(m); }
+      } else if (m.type === "error") {
+        const err = new Error(m.message);
+        const p = m.id != null ? pending[m.id] : null;
+        if (p) { delete pending[m.id]; p.reject(err); }
+        else reject(err);
       }
-    });
-    kokoroTTS = tts;
-    kokoroState = "ready";
-    showModel();
-    return tts;
-  })().catch(err => {
+    };
+    kokoroWorker.onerror = ev => reject(new Error(ev.message || "Worker failed to start"));
+    kokoroWorker.postMessage({ type: "init" });
+  }).catch(err => {
     kokoroState = "error";
     kokoroError = (err && err.message) ? err.message : String(err);
     kokoroPromise = null;   // allow retry
+    if (kokoroWorker) { kokoroWorker.terminate(); kokoroWorker = null; }
     showModel();
     throw err;
   });
   return kokoroPromise;
 }
 
-function toWavBlob(audio) {
-  if (typeof audio.toBlob === "function") return audio.toBlob();
-  const samples = audio.audio, sr = audio.sampling_rate;
+function wavFromSamples(samples, sr) {
   const buf = new ArrayBuffer(44 + samples.length * 2);
   const v = new DataView(buf);
-  const w = (o, s) => { for (let i = 0; i < s.length; i++) v.setUint8(o + i, s.charCodeAt(i)); };
+  const w = (o, str) => { for (let i = 0; i < str.length; i++) v.setUint8(o + i, str.charCodeAt(i)); };
   w(0, "RIFF"); v.setUint32(4, 36 + samples.length * 2, true); w(8, "WAVE"); w(12, "fmt ");
   v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, 1, true);
   v.setUint32(24, sr, true); v.setUint32(28, sr * 2, true); v.setUint16(32, 2, true); v.setUint16(34, 16, true);
   w(36, "data"); v.setUint32(40, samples.length * 2, true);
   for (let i = 0; i < samples.length; i++) {
-    const s = Math.max(-1, Math.min(1, samples[i]));
-    v.setInt16(44 + i * 2, s < 0 ? s * 0x8000 : s * 0x7fff, true);
+    const x = Math.max(-1, Math.min(1, samples[i]));
+    v.setInt16(44 + i * 2, x < 0 ? x * 0x8000 : x * 0x7fff, true);
   }
   return new Blob([buf], { type: "audio/wav" });
 }
 
-function kokoroUrl(word) {
+function generateInWorker(text, voice, speed) {
+  return new Promise((resolve, reject) => {
+    const id = nextId++;
+    pending[id] = { resolve, reject };
+    kokoroWorker.postMessage({ type: "generate", id, text, voice, speed });
+  });
+}
+
+const SPEED_NORMAL = 0.9, SPEED_SLOW = 0.6;
+
+function kokoroUrl(word, slow = false) {
   const voiceId = kokoroVoice;
-  const key = voiceId + "|" + word;
+  const speed = slow ? SPEED_SLOW : SPEED_NORMAL;
+  const key = voiceId + "|" + speed + "|" + word;
   if (!kokoroCache[key]) {
     const p = kokoroChain.then(async () => {
-      const audio = await kokoroTTS.generate(word, { voice: voiceId, speed: 0.9 });
-      return URL.createObjectURL(toWavBlob(audio));
+      const m = await generateInWorker(word, voiceId, speed);
+      const blob = m.blob || wavFromSamples(m.samples, m.sr);
+      return URL.createObjectURL(blob);
     });
     kokoroChain = p.catch(() => {});
     p.catch(() => { delete kokoroCache[key]; });
@@ -385,16 +452,16 @@ function kokoroUrl(word) {
   return kokoroCache[key];
 }
 
-async function kokoroSource(word) {
+async function kokoroSource(word, slow) {
   if (kokoroState === "error") throw new Error("Kokoro couldn't load");
   if (kokoroState !== "ready") {
     ensureKokoro().catch(() => {});
     throw new Error("Voice model still loading (" + kokoroPct + "%)");
   }
-  if (!kokoroCache[kokoroVoice + "|" + word]) setNote("Generating voice...");
+  if (!kokoroCache[kokoroVoice + "|" + (slow ? SPEED_SLOW : SPEED_NORMAL) + "|" + word]) setNote("Generating voice...");
   return await Promise.race([
-    kokoroUrl(word),
-    new Promise((_, reject) => setTimeout(() => reject(new Error("Voice took too long")), 8000))
+    kokoroUrl(word, slow),
+    new Promise((_, reject) => setTimeout(() => reject(new Error("Voice took too long")), 15000))
   ]);
 }
 
@@ -448,9 +515,8 @@ function speakFallback(word, rate) {
   speechSynthesis.speak(u);
 }
 
-function playUrl(url, rate, token, label, onFail) {
+function playUrl(url, token, label, onFail) {
   const row = $("playRow");
-  const pr = rate < 0.7 ? 0.7 : 1;
   let started = false;
   let timer = null;
 
@@ -473,12 +539,12 @@ function playUrl(url, rate, token, label, onFail) {
   player.onerror = fail;
 
   player.src = url;
-  player.defaultPlaybackRate = pr;
-  player.playbackRate = pr;
+  player.defaultPlaybackRate = 1;
+  player.playbackRate = 1;
   player.play().catch(fail);
 }
 
-async function speak(word, rate = 0.85) {
+async function speak(word, slow = false) {
   const token = ++speakToken;
   stopAudio();
   setNote("");
@@ -486,7 +552,7 @@ async function speak(word, rate = 0.85) {
   const useBrowser = reason => {
     if (token !== speakToken) return;
     setNote((reason ? reason + ". " : "") + "Playing: Browser voice");
-    speakFallback(word, rate);
+    speakFallback(word, slow ? 0.5 : 0.85);
   };
 
   if (voiceSetting === "browser") return useBrowser("");
@@ -494,10 +560,10 @@ async function speak(word, rate = 0.85) {
   let url, label;
   try {
     if (voiceSetting === "google") {
-      url = "https://translate.google.com/translate_tts?ie=UTF-8&client=tw-ob&tl=en-US&q=" + encodeURIComponent(word);
+      url = "https://translate.google.com/translate_tts?ie=UTF-8&client=tw-ob&tl=en-US&q=" + encodeURIComponent(word) + (slow ? "&ttsspeed=0.3" : "");
       label = "Google";
     } else {
-      url = await kokoroSource(word);
+      url = await kokoroSource(word, slow);
       label = "Kokoro";
     }
   } catch (e) {
@@ -505,7 +571,7 @@ async function speak(word, rate = 0.85) {
   }
 
   if (token !== speakToken) return;
-  playUrl(url, rate, token, label, () => useBrowser("Selected voice unavailable"));
+  playUrl(url, token, label, () => useBrowser("Selected voice unavailable"));
 }
 
 /* ---------- Random word picking ---------- */
@@ -601,7 +667,7 @@ document.querySelectorAll(".level").forEach(btn => {
 
 $("startBtn").addEventListener("click", startGame);
 $("playBtn").addEventListener("click", () => { speak(current); answer.focus(); });
-$("slowBtn").addEventListener("click", () => { speak(current, 0.5); answer.focus(); });
+$("slowBtn").addEventListener("click", () => { speak(current, true); answer.focus(); });
 $("checkBtn").addEventListener("click", check);
 answer.addEventListener("keydown", e => { if (e.key === "Enter") check(); });
 answer.addEventListener("input", () => {
