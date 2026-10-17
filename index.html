@@ -64,6 +64,13 @@
 
   .hidden { display: none; }
 
+  /* Story */
+  .outline { width: 100%; margin-top: 8px; }
+  #story h2 { font-size: 1.2rem; margin: 0 0 12px; font-weight: 600; }
+  #storyText p { color: var(--fg); margin: 0 0 14px; }
+  #storyText mark { background: rgba(128,128,128,.28); color: inherit; padding: 0 2px; border-radius: 2px; }
+  #storyCount { font-size: .85rem; margin: 0 0 16px; }
+
   /* Menu */
   .levels { display: flex; flex-direction: column; gap: 8px; margin-bottom: 20px; }
   .level { text-align: left; display: flex; justify-content: space-between; }
@@ -199,7 +206,22 @@
     </div>
 
     <button class="primary" id="startBtn" disabled>Loading words...</button>
+    <button class="outline" id="storyBtn" disabled>Read the story</button>
     <p id="loadError" class="hidden"></p>
+  </section>
+
+  <!-- Story -->
+  <section id="story" class="hidden">
+    <h1>Word Story</h1>
+    <p>One story that uses every word in the game. The game words are highlighted.</p>
+
+    <h2 id="storyTitle"></h2>
+    <div id="storyText"></div>
+    <p class="note" id="storyCount"></p>
+
+    <div class="bottom">
+      <button class="link" id="storyBackBtn">Back to menu</button>
+    </div>
   </section>
 
   <!-- Game -->
@@ -272,6 +294,76 @@ async function loadWords() {
   }
 }
 loadWords();
+
+/* ---------- Story (story.json): one story using every game word ---------- */
+let STORY = null;
+
+async function loadStory() {
+  try {
+    const res = await fetch("story.json");
+    if (!res.ok) throw new Error("HTTP " + res.status);
+    const data = await res.json();
+    if (!data.title || !Array.isArray(data.paragraphs) || data.paragraphs.length === 0) {
+      throw new Error("story.json needs a title and a paragraphs list");
+    }
+    STORY = data;
+    $("storyBtn").disabled = false;
+  } catch (err) {
+    $("storyBtn").textContent = "Story unavailable";
+    console.error("Couldn't load story.json:", err);
+  }
+}
+loadStory();
+
+function renderStory() {
+  // highlight every word from all three levels
+  const list = WORDS ? [].concat(WORDS.easy, WORDS.normal, WORDS.hard) : [];
+  const unique = [...new Set(list.map(w => w.toLowerCase()))];
+  const used = new Set();
+  const esc = w => w.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const re = unique.length ? new RegExp("\\b(" + unique.map(esc).join("|") + ")\\b", "gi") : null;
+
+  $("storyTitle").textContent = STORY.title;
+  const box = $("storyText");
+  box.textContent = "";
+
+  STORY.paragraphs.forEach(text => {
+    const p = document.createElement("p");
+    if (!re) {
+      p.textContent = text;
+    } else {
+      let last = 0, m;
+      re.lastIndex = 0;
+      while ((m = re.exec(text)) !== null) {
+        if (m.index > last) p.appendChild(document.createTextNode(text.slice(last, m.index)));
+        const mark = document.createElement("mark");
+        mark.textContent = m[0];
+        p.appendChild(mark);
+        used.add(m[0].toLowerCase());
+        last = m.index + m[0].length;
+      }
+      if (last < text.length) p.appendChild(document.createTextNode(text.slice(last)));
+    }
+    box.appendChild(p);
+  });
+
+  $("storyCount").textContent = unique.length ? "Words highlighted: " + used.size + " of " + unique.length : "";
+}
+
+function openStory() {
+  if (!STORY) return;
+  renderStory();
+  menu.classList.add("hidden");
+  $("story").classList.remove("hidden");
+  window.scrollTo(0, 0);
+}
+
+$("storyBtn").addEventListener("click", openStory);
+$("storyBackBtn").addEventListener("click", () => {
+  $("story").classList.add("hidden");
+  menu.classList.remove("hidden");
+  window.scrollTo(0, 0);
+});
 
 /* ---------- Settings ---------- */
 const HINTS = {
