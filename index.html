@@ -60,12 +60,12 @@
   }
   button:hover { border-color: var(--fg); }
   button:disabled { opacity: .5; cursor: default; }
-  button:focus-visible, input:focus-visible { outline: 2px solid var(--fg); outline-offset: 2px; }
+  button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px solid var(--fg); outline-offset: 2px; }
 
   .hidden { display: none; }
 
   /* Menu */
-  .levels { display: flex; flex-direction: column; gap: 8px; margin-bottom: 16px; }
+  .levels { display: flex; flex-direction: column; gap: 8px; margin-bottom: 20px; }
   .level { text-align: left; display: flex; justify-content: space-between; }
   .level span { color: var(--muted); }
   .level[aria-pressed="true"] { border-color: var(--fg); background: rgba(128,128,128,.12); }
@@ -73,11 +73,28 @@
   .primary:hover { opacity: .85; }
   #loadError { margin: 16px 0 0; color: var(--bad); }
 
+  /* Settings */
+  .setting { margin-bottom: 20px; }
+  .setting label { display: block; margin-bottom: 6px; font-size: .9rem; color: var(--muted); }
+  .setting .row { display: flex; gap: 8px; }
+  select {
+    flex: 1;
+    font: inherit;
+    color: inherit;
+    background: var(--bg);
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    padding: 10px;
+  }
+  .hint { font-size: .85rem; color: var(--muted); margin: 8px 0 0; }
+  .note { font-size: .85rem; color: var(--muted); min-height: 1.2em; margin: 4px 0 0; }
+
   /* Game */
   .top { display: flex; justify-content: space-between; color: var(--muted); font-size: .9rem; margin-bottom: 28px; }
 
-  .play-row { display: flex; gap: 8px; margin-bottom: 20px; animation: fade .35s ease; }
+  .play-row { display: flex; gap: 8px; margin-bottom: 8px; animation: fade .35s ease; }
   .play-row .play { flex: 1; display: flex; align-items: center; justify-content: center; gap: 10px; }
+  #voiceNote { text-align: center; margin: 0 0 12px; }
 
   .dot {
     width: 10px; height: 10px; border-radius: 50%;
@@ -128,11 +145,29 @@
   <section id="menu">
     <h1>Spelling Game</h1>
     <p>Listen to the word, then type how it's spelled.</p>
+
     <div class="levels" id="levels">
       <button class="level" data-level="easy" aria-pressed="false">Easy <span>short, common words</span></button>
       <button class="level" data-level="normal" aria-pressed="true">Normal <span>trickier words</span></button>
       <button class="level" data-level="hard" aria-pressed="false">Hard <span>tough words</span></button>
     </div>
+
+    <div class="setting">
+      <label for="voiceSel">Voice</label>
+      <div class="row">
+        <select id="voiceSel">
+          <option value="auto">Auto (best available)</option>
+          <option value="kokoro">Kokoro (audio files)</option>
+          <option value="piper">Piper (audio files)</option>
+          <option value="google">Google (online)</option>
+          <option value="browser">Browser voice</option>
+        </select>
+        <button id="testBtn" type="button">Test</button>
+      </div>
+      <p class="hint" id="voiceHint"></p>
+      <p class="note" id="testNote"></p>
+    </div>
+
     <button class="primary" id="startBtn" disabled>Loading words...</button>
     <p id="loadError" class="hidden"></p>
   </section>
@@ -148,13 +183,14 @@
       <button class="play" id="playBtn"><span class="dot"></span> Play word</button>
       <button id="slowBtn" title="Play slowly">Slow</button>
     </div>
+    <p class="note" id="voiceNote"></p>
 
     <input type="text" id="answer" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" aria-label="Type the spelling" placeholder="Type the word">
     <button class="primary" id="checkBtn">Check</button>
     <p id="feedback" role="status" aria-live="polite"></p>
 
     <div class="bottom">
-      <button class="link" id="menuBtn">Change difficulty</button>
+      <button class="link" id="menuBtn">Change difficulty or voice</button>
     </div>
   </section>
 
@@ -200,8 +236,46 @@ async function loadWords() {
 }
 loadWords();
 
+/* ---------- Voice settings ---------- */
+const VOICE_KEY = "spelling.voice";
+const HINTS = {
+  auto:    "Tries Kokoro files, then Piper files, then Google, then your browser's voice.",
+  kokoro:  "Plays files from audio/kokoro/ (made with generate_audio.py).",
+  piper:   "Plays files from audio/piper/ (made with generate_audio.py).",
+  google:  "Needs internet. Natural sounding, but it's an unofficial service.",
+  browser: "Your device's built-in voice. Works offline."
+};
+let voiceSetting = "auto";
+try {
+  const saved = localStorage.getItem(VOICE_KEY);
+  if (saved && HINTS[saved]) voiceSetting = saved;
+} catch (e) {}
+
+const dead = new Set(); // in Auto mode: sources that failed, so we stop trying them
+
+$("voiceSel").value = voiceSetting;
+$("voiceHint").textContent = HINTS[voiceSetting];
+
+$("voiceSel").addEventListener("change", e => {
+  voiceSetting = e.target.value;
+  try { localStorage.setItem(VOICE_KEY, voiceSetting); } catch (err) {}
+  dead.clear();
+  $("voiceHint").textContent = HINTS[voiceSetting];
+  setNote("");
+});
+
+$("testBtn").addEventListener("click", () => {
+  const list = WORDS ? WORDS[level] : ["spelling"];
+  speak(list[Math.floor(Math.random() * list.length)]);
+});
+
+function setNote(msg) {
+  $("voiceNote").textContent = msg;
+  $("testNote").textContent = msg;
+}
+
 /* ---------- Text to speech ---------- */
-const audioCache = {};
+const audioCache = {};   // url -> Audio element (also used for preloading)
 let player = null;
 let speakToken = 0;
 
@@ -221,21 +295,30 @@ if (hasTTS) {
   speechSynthesis.addEventListener("voiceschanged", pickVoice);
 }
 
-async function getAudioUrl(word) {
-  if (word in audioCache) return audioCache[word];
-  try {
-    const r = await fetch("https://api.dictionaryapi.dev/api/v2/entries/en/" + encodeURIComponent(word));
-    if (!r.ok) throw new Error("not found");
-    const data = await r.json();
-    const urls = data
-      .flatMap(e => (e.phonetics || []).map(p => p.audio))
-      .filter(Boolean)
-      .map(u => (u.startsWith("//") ? "https:" + u : u));
-    audioCache[word] = urls.find(u => u.includes("-us")) || urls[0] || null;
-  } catch (e) {
-    audioCache[word] = null;
+// Which audio URLs to try, in order, for the chosen voice.
+// The browser voice is always the last resort (handled in speak()).
+function candidates(word) {
+  const file = encodeURIComponent(word.toLowerCase());
+  const all = {
+    kokoro: { src: "kokoro", url: "audio/kokoro/" + file + ".wav" },
+    piper:  { src: "piper",  url: "audio/piper/" + file + ".wav" },
+    google: { src: "google", url: "https://translate.google.com/translate_tts?ie=UTF-8&client=tw-ob&tl=en-US&q=" + encodeURIComponent(word) }
+  };
+  if (voiceSetting === "browser") return [];
+  if (voiceSetting === "auto") {
+    return ["kokoro", "piper", "google"].filter(s => !dead.has(s)).map(s => all[s]);
   }
-  return audioCache[word];
+  return [all[voiceSetting]];
+}
+
+function getAudio(url) {
+  if (!audioCache[url]) {
+    const a = new Audio();
+    a.preload = "auto";
+    a.src = url;
+    audioCache[url] = a;
+  }
+  return audioCache[url];
 }
 
 function stopAudio() {
@@ -256,24 +339,47 @@ function speakFallback(word, rate) {
   speechSynthesis.speak(u);
 }
 
-async function speak(word, rate = 0.85) {
+function speak(word, rate = 0.85) {
   const token = ++speakToken;
   stopAudio();
-  const url = await getAudioUrl(word);
-  if (token !== speakToken) return;
-  if (url) {
-    const row = $("playRow");
-    player = new Audio(url);
-    player.playbackRate = rate < 0.7 ? 0.7 : 1;
-    player.onplaying = () => row.classList.add("speaking");
-    player.onended = () => row.classList.remove("speaking");
-    player.play().catch(() => {
-      row.classList.remove("speaking");
-      if (token === speakToken) speakFallback(word, rate);
-    });
-  } else {
-    speakFallback(word, rate);
+  setNote("");
+  const row = $("playRow");
+  const list = candidates(word);
+
+  function tryNext(i) {
+    if (token !== speakToken) return;
+    if (i >= list.length) {
+      if (list.length) setNote("Selected voice unavailable, using browser voice.");
+      speakFallback(word, rate);
+      return;
+    }
+
+    const { src, url } = list[i];
+    const a = getAudio(url);
+    player = a;
+    a.currentTime = 0;
+    a.playbackRate = rate < 0.7 ? 0.7 : 1;
+
+    let started = false;
+    let timer = null;
+    const fail = markDead => {
+      if (token !== speakToken) return;
+      clearTimeout(timer);
+      a.onplaying = a.onended = a.onerror = null;
+      a.pause();
+      delete audioCache[url];
+      if (markDead && voiceSetting === "auto") dead.add(src);
+      tryNext(i + 1);
+    };
+
+    timer = setTimeout(() => { if (!started) fail(false); }, 3000);
+    a.onplaying = () => { started = true; clearTimeout(timer); row.classList.add("speaking"); };
+    a.onended = () => row.classList.remove("speaking");
+    a.onerror = () => fail(true);
+    a.play().catch(() => fail(false));
   }
+
+  tryNext(0);
 }
 
 /* ---------- Random word picking ---------- */
@@ -286,12 +392,21 @@ function shuffle(arr) {
   return a;
 }
 
+function refill() {
+  queue = shuffle(WORDS[level]);
+  if (queue.length > 1 && queue[queue.length - 1] === current) queue.reverse(); // avoid immediate repeat
+}
+
 function nextWord() {
-  if (queue.length === 0) {
-    queue = shuffle(WORDS[level]);
-    if (queue[queue.length - 1] === current) queue.reverse(); // avoid immediate repeat
-  }
+  if (queue.length === 0) refill();
   return queue.pop();
+}
+
+// Start loading the next word's audio while the player is still on this one
+function preloadNext() {
+  if (queue.length === 0) refill();
+  const c = candidates(queue[queue.length - 1])[0];
+  if (c) getAudio(c.url);
 }
 
 /* ---------- Game flow ---------- */
@@ -305,6 +420,7 @@ function newRound() {
   feedback.className = "";
   answer.focus();
   speak(current);
+  preloadNext();
 }
 
 function startGame() {
@@ -366,7 +482,9 @@ answer.addEventListener("input", () => {
   if (!locked) { answer.className = ""; feedback.textContent = ""; }
 });
 $("menuBtn").addEventListener("click", () => {
+  speakToken++;
   stopAudio();
+  setNote("");
   game.classList.add("hidden");
   menu.classList.remove("hidden");
 });
