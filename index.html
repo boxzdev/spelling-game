@@ -172,6 +172,8 @@
         <select id="voiceSel">
           <option value="kokoro">Kokoro (AI, in your browser)</option>
           <option value="piper">Piper (AI, in your browser)</option>
+          <option value="kitten">Kitten (tiny AI, in your browser)</option>
+          <option value="edge">Edge neural (pre-made audio files)</option>
           <option value="google">Google (online)</option>
           <option value="browser">Browser voice</option>
         </select>
@@ -197,6 +199,30 @@
           <option value="en_US-lessac-medium">Lessac (US)</option>
           <option value="en_US-amy-medium">Amy (US)</option>
           <option value="en_US-ryan-medium">Ryan (US)</option>
+        </select>
+      </div>
+
+      <div id="tvoiceWrap">
+        <label for="tvoiceSel">Kitten voice</label>
+        <select id="tvoiceSel">
+          <option value="Bella">Bella (female)</option>
+          <option value="Luna">Luna (female)</option>
+          <option value="Rosie">Rosie (female)</option>
+          <option value="Kiki">Kiki (female)</option>
+          <option value="Leo">Leo (male)</option>
+          <option value="Jasper">Jasper (male)</option>
+          <option value="Bruno">Bruno (male)</option>
+          <option value="Hugo">Hugo (male)</option>
+        </select>
+      </div>
+
+      <div id="evoiceWrap">
+        <label for="evoiceSel">Edge voice</label>
+        <select id="evoiceSel">
+          <option value="en-US-AriaNeural">Aria (female, US)</option>
+          <option value="en-US-GuyNeural">Guy (male, US)</option>
+          <option value="en-GB-SoniaNeural">Sonia (female, UK)</option>
+          <option value="en-GB-RyanNeural">Ryan (male, UK)</option>
         </select>
       </div>
 
@@ -369,13 +395,20 @@ $("storyBackBtn").addEventListener("click", () => {
 const HINTS = {
   kokoro:  "Natural AI voice that runs inside your browser. Downloads about 90 MB the first time, then it's saved.",
   piper:   "AI voice that runs inside your browser. Makes each word faster than Kokoro but sounds a little less natural. Downloads roughly 60-80 MB the first time, then it's saved.",
+  kitten:  "Tiny AI voice that runs inside your browser. Downloads about 25 MB the first time, then it's saved. Loads fast, but sounds a bit less natural than Kokoro.",
+  edge:    "Natural Microsoft voices saved as audio files. Needs the audio generated first (see generate_audio.py). Words without a file fall back to the browser voice.",
   google:  "Needs internet. Natural sounding, but it's an unofficial service.",
   browser: "Your device's built-in voice. Works offline."
 };
 const KOKORO_VOICES = ["af_heart", "af_bella", "am_michael", "bf_emma", "bm_george"];
 const PIPER_VOICES = ["en_US-hfc_female-medium", "en_US-hfc_male-medium", "en_US-lessac-medium", "en_US-amy-medium", "en_US-ryan-medium"];
 
+const KITTEN_VOICES = ["Bella", "Luna", "Rosie", "Kiki", "Leo", "Jasper", "Bruno", "Hugo"];
+const EDGE_VOICES = ["en-US-AriaNeural", "en-US-GuyNeural", "en-GB-SoniaNeural", "en-GB-RyanNeural"];
+
 let voiceSetting = "kokoro";
+let kittenVoice = "Bella";
+let edgeVoice = "en-US-AriaNeural";
 let kokoroVoice = "af_heart";
 let piperVoice = "en_US-hfc_female-medium";
 try {
@@ -385,6 +418,10 @@ try {
   if (kv && KOKORO_VOICES.includes(kv)) kokoroVoice = kv;
   const pv = localStorage.getItem("spelling.pvoice");
   if (pv && PIPER_VOICES.includes(pv)) piperVoice = pv;
+  const tv = localStorage.getItem("spelling.tvoice");
+  if (tv && KITTEN_VOICES.includes(tv)) kittenVoice = tv;
+  const ev = localStorage.getItem("spelling.evoice");
+  if (ev && EDGE_VOICES.includes(ev)) edgeVoice = ev;
 } catch (e) {}
 
 function save(key, val) { try { localStorage.setItem(key, val); } catch (e) {} }
@@ -393,6 +430,10 @@ function refreshSettingsUI() {
   $("voiceSel").value = voiceSetting;
   $("kvoiceSel").value = kokoroVoice;
   $("pvoiceSel").value = piperVoice;
+  $("tvoiceSel").value = kittenVoice;
+  $("evoiceSel").value = edgeVoice;
+  $("tvoiceWrap").classList.toggle("hidden", voiceSetting !== "kitten");
+  $("evoiceWrap").classList.toggle("hidden", voiceSetting !== "edge");
   $("kvoiceWrap").classList.toggle("hidden", voiceSetting !== "kokoro");
   $("pvoiceWrap").classList.toggle("hidden", voiceSetting !== "piper");
   $("voiceHint").textContent = HINTS[voiceSetting];
@@ -417,6 +458,16 @@ $("pvoiceSel").addEventListener("change", e => {
   save("spelling.pvoice", piperVoice);
   startActiveEngine();
   showModel();
+});
+
+$("tvoiceSel").addEventListener("change", e => {
+  kittenVoice = e.target.value;
+  save("spelling.tvoice", kittenVoice);
+});
+
+$("evoiceSel").addEventListener("change", e => {
+  edgeVoice = e.target.value;
+  save("spelling.evoice", edgeVoice);
 });
 
 $("testBtn").addEventListener("click", () => {
@@ -471,6 +522,28 @@ self.onmessage = async (e) => {
       } else {
         self.postMessage({ type: "audio", id: m.id, blob: audio.toBlob() });
       }
+    }
+  } catch (err) {
+    self.postMessage({ type: "error", id: m.id, message: String((err && err.message) || err) });
+  }
+};
+`;
+
+const KITTEN_WORKER = `
+import { KittenTTS } from "https://esm.sh/kitten-tts-js@0.1.2";
+
+let tts = null;
+
+self.onmessage = async (e) => {
+  const m = e.data;
+  try {
+    if (m.type === "init") {
+      if (!tts) tts = await KittenTTS.from_pretrained("KittenML/kitten-tts-nano-0.8");
+      self.postMessage({ type: "ready" });
+    } else if (m.type === "generate") {
+      const audio = await tts.generate(m.text, { voice: m.voice, speed: m.speed });
+      const samples = new Float32Array(audio.data);
+      self.postMessage({ type: "audio", id: m.id, samples: samples, sr: audio.sampling_rate }, [samples.buffer]);
     }
   } catch (err) {
     self.postMessage({ type: "error", id: m.id, message: String((err && err.message) || err) });
@@ -638,12 +711,16 @@ function makeEngine(label, workerSrc, perVoice) {
 
 const kokoro = makeEngine("Kokoro", KOKORO_WORKER, false);
 const piper = makeEngine("Piper", PIPER_WORKER, true);
+const kitten = makeEngine("Kitten", KITTEN_WORKER, false);
 
 function activeEngine() {
-  return voiceSetting === "kokoro" ? kokoro : voiceSetting === "piper" ? piper : null;
+  return voiceSetting === "kokoro" ? kokoro
+       : voiceSetting === "piper" ? piper
+       : voiceSetting === "kitten" ? kitten : null;
 }
 function activeVoice() {
-  return voiceSetting === "piper" ? piperVoice : kokoroVoice;
+  return voiceSetting === "piper" ? piperVoice
+       : voiceSetting === "kitten" ? kittenVoice : kokoroVoice;
 }
 function startActiveEngine() {
   const e = activeEngine();
@@ -654,7 +731,7 @@ function showModel() {
   const el = $("modelNote");
   const e = activeEngine();
   if (!e) { el.textContent = ""; return; }
-  if (e.state === "loading") el.textContent = e.pct >= 99 ? "Starting voice..." : "Loading voice model... " + e.pct + "%";
+  if (e.state === "loading") el.textContent = e.pct >= 99 ? "Starting voice..." : e.pct > 0 ? "Loading voice model... " + e.pct + "%" : "Loading voice model...";
   else if (e.state === "ready") el.textContent = "Voice model ready.";
   else if (e.state === "error") el.textContent = "Couldn't load the voice model (" + e.error + "). Try another voice.";
   else el.textContent = "";
@@ -776,6 +853,14 @@ async function speak(word, slow = false) {
       url = await engineSource(piper, piperVoice, 1, word);
       label = "Piper";
       rate = slow ? 0.75 : 1;   // Piper has no speed setting, so slow it down while playing
+    } else if (voiceSetting === "kitten") {
+      url = await engineSource(kitten, kittenVoice, slow ? SPEED_SLOW : SPEED_NORMAL, word);
+      label = "Kitten";
+    } else if (voiceSetting === "edge") {
+      // Pre-made files from generate_audio.py: audio/edge/<voice>/<word>.mp3
+      url = "audio/edge/" + edgeVoice + "/" + encodeURIComponent(word.trim().toLowerCase()) + ".mp3";
+      label = "Edge";
+      rate = slow ? 0.75 : 1;   // files are normal speed, so slow them down while playing
     } else {
       url = await engineSource(kokoro, kokoroVoice, slow ? SPEED_SLOW : SPEED_NORMAL, word);
       label = "Kokoro";
@@ -785,7 +870,10 @@ async function speak(word, slow = false) {
   }
 
   if (token !== speakToken) return;
-  playUrl(url, token, label, () => useBrowser("Selected voice unavailable"), rate);
+  const failMsg = voiceSetting === "edge"
+    ? "No Edge audio file for this word (generate the audio first)"
+    : "Selected voice unavailable";
+  playUrl(url, token, label, () => useBrowser(failMsg), rate);
 }
 
 /* ---------- Random word picking ---------- */
@@ -813,7 +901,7 @@ function preloadNext() {
   const e = activeEngine();
   if (!e || e.state !== "ready") return;
   if (queue.length === 0) refill();
-  const speed = voiceSetting === "kokoro" ? SPEED_NORMAL : 1;
+  const speed = (voiceSetting === "kokoro" || voiceSetting === "kitten") ? SPEED_NORMAL : 1;
   e.url(queue[queue.length - 1], activeVoice(), speed).catch(() => {});
 }
 
@@ -949,3 +1037,4 @@ startActiveEngine();
 </script>
 </body>
 </html>
+ 
