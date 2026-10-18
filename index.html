@@ -395,7 +395,7 @@ $("storyBackBtn").addEventListener("click", () => {
 const HINTS = {
   kokoro:  "Natural AI voice that runs inside your browser. Downloads about 90 MB the first time, then it's saved.",
   piper:   "AI voice that runs inside your browser. Makes each word faster than Kokoro but sounds a little less natural. Downloads roughly 60-80 MB the first time, then it's saved.",
-  kitten:  "Tiny AI voice that runs inside your browser. Downloads about 25 MB the first time, then it's saved. Loads fast, but sounds a bit less natural than Kokoro.",
+  kitten:  "Tiny AI voice that runs inside your browser. Downloads about 40 MB the first time, then it's saved. Loads fast, but sounds a bit less natural than Kokoro.",
   edge:    "Natural Microsoft voices saved as audio files. Needs the audio generated first (see generate_audio.py). Words without a file fall back to the browser voice.",
   google:  "Needs internet. Natural sounding, but it's an unofficial service.",
   browser: "Your device's built-in voice. Works offline."
@@ -530,15 +530,93 @@ self.onmessage = async (e) => {
 `;
 
 const KITTEN_WORKER = `
-import { KittenTTS } from "https://esm.sh/kitten-tts-js@0.1.2";
+// Kitten's own loader assumes Node when loaded through esm.sh, so we load the files ourselves.
+import { KittenTTS, loadNpz } from "https://cdn.jsdelivr.net/npm/kitten-tts-js@0.1.2/+esm";
+import * as ort from "https://cdn.jsdelivr.net/npm/onnxruntime-web@1.22.0/dist/ort.wasm.min.mjs";
+
+ort.env.wasm.wasmPaths = "https://cdn.jsdelivr.net/npm/onnxruntime-web@1.22.0/dist/";
+ort.env.wasm.numThreads = 1;
+
+const BASE = "https://huggingface.co/KittenML/kitten-tts-nano-0.8/resolve/main/";
+const GUESS = { model: 25000000, voices: 1000000 };   // used for the progress bar if the size is unknown
+const AUDIO_TRIM = 5000;                              // same trim the original library applies
 
 let tts = null;
+const files = {};
+let lastPost = 0;
+
+function report(force) {
+  const now = Date.now();
+  if (!force && now - lastPost < 250) return;
+  lastPost = now;
+  let l = 0, t = 0;
+  for (const f of Object.values(files)) { l += f.loaded; t += Math.max(f.total, f.loaded); }
+  if (t > 0) self.postMessage({ type: "progress", pct: Math.min(99, Math.round((l / t) * 100)) });
+}
+
+async function getFile(name, guess) {
+  const url = BASE + name;
+  let cache = null;
+  try { cache = await caches.open("kitten-tts-v1"); } catch (e) {}
+  if (cache) {
+    const hit = await cache.match(url);
+    if (hit) return await hit.arrayBuffer();
+  }
+  const res = await fetch(url);
+  if (!res.ok) throw new Error("HTTP " + res.status + " downloading " + name);
+  const total = Number(res.headers.get("content-length")) || guess || 0;
+  const reader = res.body.getReader();
+  const chunks = [];
+  let loaded = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    chunks.push(value);
+    loaded += value.length;
+    if (guess) {                       // skip the tiny config file so the bar doesn't jump
+      files[name] = { loaded: loaded, total: total };
+      report(false);
+    }
+  }
+  const bytes = new Uint8Array(loaded);
+  let off = 0;
+  for (const c of chunks) { bytes.set(c, off); off += c.length; }
+  if (cache) { try { await cache.put(url, new Response(bytes)); } catch (e) {} }
+  return bytes.buffer;
+}
+
+async function loadModel() {
+  const config = JSON.parse(new TextDecoder().decode(await getFile("config.json", 0)));
+  if (!config.model_file) throw new Error("config.json has no model_file");
+  const results = await Promise.all([
+    getFile(config.model_file, GUESS.model),
+    getFile(config.voices || "voices.npz", GUESS.voices)
+  ]);
+  report(true);
+  const session = await ort.InferenceSession.create(new Uint8Array(results[0]), { executionProviders: ["wasm"] });
+  const voices = await loadNpz(results[1]);
+  const model = new KittenTTS(session, voices, config);
+
+  // Run the model with our own onnxruntime copy (the library would load a second, mismatched one)
+  model._runInference = async function (args) {
+    const ids = args.input_ids;
+    const feeds = {
+      input_ids: new ort.Tensor("int64", BigInt64Array.from(ids.map(BigInt)), [1, ids.length]),
+      style: new ort.Tensor("float32", new Float32Array(args.style), [1, args.styleDim]),
+      speed: new ort.Tensor("float32", new Float32Array([args.speed]), [1])
+    };
+    const out = await this._session.run(feeds);
+    const data = out[Object.keys(out)[0]].data;
+    return new Float32Array(data.slice(0, Math.max(0, data.length - AUDIO_TRIM)));
+  };
+  return model;
+}
 
 self.onmessage = async (e) => {
   const m = e.data;
   try {
     if (m.type === "init") {
-      if (!tts) tts = await KittenTTS.from_pretrained("KittenML/kitten-tts-nano-0.8");
+      if (!tts) tts = await loadModel();
       self.postMessage({ type: "ready" });
     } else if (m.type === "generate") {
       const audio = await tts.generate(m.text, { voice: m.voice, speed: m.speed });
@@ -1037,4 +1115,3 @@ startActiveEngine();
 </script>
 </body>
 </html>
- 
