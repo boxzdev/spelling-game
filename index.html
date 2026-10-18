@@ -2,6 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
+<meta name="referrer" content="no-referrer">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Spelling Game</title>
 <style>
@@ -830,6 +831,7 @@ async function engineSource(eng, voice, speed, word) {
 
 /* ---------- Playing audio ---------- */
 const player = new Audio();       // one shared element, so mobile browsers keep it unlocked
+player.referrerPolicy = "no-referrer";   // Google's voice rejects requests that carry a Referer
 let speakToken = 0;
 
 // Mobile browsers only allow audio after a tap. Unlock the player on the first tap.
@@ -925,7 +927,8 @@ async function speak(word, slow = false) {
   let url, label, rate = 1;
   try {
     if (voiceSetting === "google") {
-      url = "https://translate.google.com/translate_tts?ie=UTF-8&client=tw-ob&tl=en-US&q=" + encodeURIComponent(word) + (slow ? "&ttsspeed=0.3" : "");
+      url = "https://translate.google.com/translate_tts?ie=UTF-8&total=1&idx=0&textlen=" + word.length +
+            "&client=tw-ob&tl=en-US&q=" + encodeURIComponent(word) + (slow ? "&ttsspeed=0.3" : "");
       label = "Google";
     } else if (voiceSetting === "piper") {
       url = await engineSource(piper, piperVoice, 1, word);
@@ -950,6 +953,8 @@ async function speak(word, slow = false) {
   if (token !== speakToken) return;
   const failMsg = voiceSetting === "edge"
     ? "No Edge audio file for this word (generate the audio first)"
+    : voiceSetting === "google"
+    ? "Google blocked the request or you're offline"
     : "Selected voice unavailable";
   playUrl(url, token, label, () => useBrowser(failMsg), rate);
 }
