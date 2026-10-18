@@ -5,6 +5,7 @@ Generate an audio file for every word in words.json.
 Run this on your computer (not on GitHub). It creates:
     audio/kokoro/<word>.wav
     audio/piper/<word>.wav
+    audio/edge/<voice>/<word>.mp3
 Then commit the audio/ folder next to index.html.
 
 --- Kokoro (most natural) ---
@@ -18,8 +19,19 @@ Then commit the audio/ folder next to index.html.
   python generate_audio.py --engine piper --piper-model en_US-lessac-medium
   (older Piper: pass the path to the .onnx file instead of the voice name)
 
---- Both ---
+--- Edge neural voices (free, very natural, needs internet while generating) ---
+  pip install edge-tts
+  python generate_audio.py --engine edge
+  (makes 4 voices by default; choose your own with --edge-voices en-US-AriaNeural,en-US-GuyNeural)
+  The game's "Edge neural" option plays these files, so generate them first.
+
+--- Kokoro + Piper ---
   python generate_audio.py --engine both --piper-model en_US-lessac-medium
+
+--- Everything ---
+  python generate_audio.py --engine all --piper-model en_US-lessac-medium
+
+Note: the "Kitten" voice in the game runs live in the browser, so it needs no files.
 
 Tip: test with a few words first:  --limit 5
 Files that already exist are skipped, so it's safe to re-run after adding words.
@@ -97,14 +109,51 @@ def make_piper(words, out_dir, model):
         print(f"[piper] {i}/{total} {word}")
 
 
+DEFAULT_EDGE_VOICES = "en-US-AriaNeural,en-US-GuyNeural,en-GB-SoniaNeural,en-GB-RyanNeural"
+
+
+def make_edge(words, out_dir, voices, rate):
+    try:
+        import edge_tts
+    except ImportError:
+        sys.exit("edge-tts isn't installed. Run: pip install edge-tts")
+    import asyncio
+
+    async def run():
+        total = len(words)
+        for voice in voices:
+            voice_dir = out_dir / voice
+            voice_dir.mkdir(parents=True, exist_ok=True)
+            for i, word in enumerate(words, 1):
+                target = voice_dir / f"{word}.mp3"
+                if target.exists() and target.stat().st_size > 0:
+                    continue
+                for attempt in range(3):
+                    try:
+                        await edge_tts.Communicate(word, voice, rate=rate).save(str(target))
+                        if target.stat().st_size == 0:
+                            raise RuntimeError("empty audio file")
+                        break
+                    except Exception as err:
+                        target.unlink(missing_ok=True)
+                        if attempt == 2:
+                            sys.exit(f"Edge failed on '{word}' ({voice}): {err}")
+                        await asyncio.sleep(2)
+                print(f"[edge:{voice}] {i}/{total} {word}")
+
+    asyncio.run(run())
+
+
 def main():
     p = argparse.ArgumentParser(description="Generate word audio from words.json")
-    p.add_argument("--engine", choices=["kokoro", "piper", "both"], required=True)
+    p.add_argument("--engine", choices=["kokoro", "piper", "edge", "both", "all"], required=True)
     p.add_argument("--words", default="words.json", help="path to words.json")
     p.add_argument("--out", default="audio", help="output folder")
     p.add_argument("--kokoro-voice", default="af_heart", help="Kokoro voice name")
     p.add_argument("--speed", type=float, default=0.9, help="Kokoro speaking speed")
     p.add_argument("--piper-model", default=None, help="Piper voice name or .onnx path")
+    p.add_argument("--edge-voices", default=DEFAULT_EDGE_VOICES, help="comma-separated Edge voice names")
+    p.add_argument("--edge-rate", default="-10%", help="Edge speaking rate, e.g. -10%% or +0%%")
     p.add_argument("--limit", type=int, default=None, help="only do the first N words (for testing)")
     args = p.parse_args()
 
@@ -114,10 +163,13 @@ def main():
     print(f"{len(words)} words")
 
     out = Path(args.out)
-    if args.engine in ("kokoro", "both"):
+    if args.engine in ("kokoro", "both", "all"):
         make_kokoro(words, out / "kokoro", args.kokoro_voice, args.speed)
-    if args.engine in ("piper", "both"):
+    if args.engine in ("piper", "both", "all"):
         make_piper(words, out / "piper", args.piper_model)
+    if args.engine in ("edge", "all"):
+        voices = [v.strip() for v in args.edge_voices.split(",") if v.strip()]
+        make_edge(words, out / "edge", voices, args.edge_rate)
 
     print("Done. Commit the audio/ folder next to index.html.")
 
