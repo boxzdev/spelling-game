@@ -269,8 +269,9 @@
     <div class="tools">
       <button class="tool" id="hearBtn" type="button" disabled title="Hear what I typed (-1 streak)" aria-label="Hear what I typed, costs 1 streak">H</button>
       <button class="tool" id="clueBtn" type="button" disabled title="Clue: how many letters (-1 streak)" aria-label="Clue: how many letters, costs 1 streak">L</button>
+      <button class="tool" id="showBtn" type="button" disabled title="Show answer (streak resets to 0)" aria-label="Show the answer, resets streak to 0">A</button>
     </div>
-    <p class="note" id="toolHint">H = hear what you typed &nbsp; L = letter count &nbsp; (each costs 1 streak)</p>
+    <p class="note" id="toolHint">H = hear what you typed &nbsp; L = letter count &nbsp; A = show answer &nbsp; (H and L cost 1 streak, A resets it to 0)</p>
     <button class="primary" id="checkBtn">Check</button>
     <p id="feedback" role="status" aria-live="polite"></p>
 
@@ -1023,6 +1024,7 @@ function startGame() {
 function updateToolBtns() {
   $("hearBtn").disabled = streak < 1;
   $("clueBtn").disabled = streak < 1 || clueUsed;
+  $("showBtn").disabled = streak < 1;
 }
 
 // Costs 1 streak point to hear the typed text read aloud
@@ -1055,6 +1057,21 @@ function giveClue() {
   feedback.textContent = "Streak -1";
   feedback.className = "";
   answer.focus();
+}
+
+// Shows the answer, resets the whole streak, then moves on to the next word
+function showAnswer() {
+  if (locked || streak < 1) return;
+  locked = true;
+  streak = 0;
+  $("streak").textContent = 0;
+  updateToolBtns();
+  answer.value = current;
+  answer.disabled = true;
+  answer.className = "";
+  feedback.textContent = "The word is \u201C" + current + "\u201D. Streak reset.";
+  feedback.className = "bad";
+  setTimeout(newRound, 2500);
 }
 
 function check() {
@@ -1102,6 +1119,7 @@ $("slowBtn").addEventListener("click", () => { speak(current, true); answer.focu
 $("checkBtn").addEventListener("click", check);
 $("hearBtn").addEventListener("click", hearTyped);
 $("clueBtn").addEventListener("click", giveClue);
+$("showBtn").addEventListener("click", showAnswer);
 answer.addEventListener("keydown", e => { if (e.key === "Enter") check(); });
 answer.addEventListener("input", () => {
   if (!locked) { answer.className = ""; feedback.textContent = ""; }
